@@ -17,6 +17,22 @@ DEVICE_ID = "aiy-voice-pi4-001"
 
 BUTTON_GPIO = 23
 ALSA_DEVICE = "talkingbox"
+CAPTURE_DEVICE = "plughw:CARD=sndrpigooglevoi"
+
+VOLUME_MIXER_DEVICE = "talkingbox"
+VOLUME_CONTROL = "TalkingBoxVolume"
+
+VOLUME_QUIET = 20
+VOLUME_DEFAULT = 55
+VOLUME_LOUD = 75
+VOLUME_EXTREME = 100
+
+VOLUME_LEVELS = [
+    VOLUME_QUIET,
+    VOLUME_DEFAULT,
+    VOLUME_LOUD,
+    VOLUME_EXTREME,
+]
 RECORD_RATE = 16000
 MAX_RECORD_SECONDS = 45
 
@@ -57,6 +73,8 @@ button = Button(
     pull_up=True,
     bounce_time=0.03,
 )
+
+last_spoken_text = None
 
 
 def utc_now():
@@ -211,13 +229,111 @@ def is_shutdown_request(text):
     }
 
 
+def run_amixer(*args, capture=False):
+    return subprocess.run(
+        ["amixer", "-D", VOLUME_MIXER_DEVICE, *args],
+        check=True,
+        text=True,
+        capture_output=capture,
+    )
+
+
+def set_volume(percent):
+    percent = max(0, min(100, int(percent)))
+    run_amixer("sset", VOLUME_CONTROL, f"{percent}%")
+    print(f"Volume set to {percent}%.")
+    return percent
+
+
+def get_volume():
+    try:
+        result = run_amixer("sget", VOLUME_CONTROL, capture=True)
+        matches = re.findall(r"\[(\d+)%\]", result.stdout)
+        if matches:
+            return int(matches[-1])
+    except Exception as exc:
+        print(f"Could not read volume: {type(exc).__name__}: {exc}")
+    return VOLUME_DEFAULT
+
+
+def step_volume(direction):
+    current = get_volume()
+
+    if direction > 0:
+        for level in VOLUME_LEVELS:
+            if level > current + 1:
+                return set_volume(level)
+        return set_volume(VOLUME_EXTREME)
+
+    for level in reversed(VOLUME_LEVELS):
+        if level < current - 1:
+            return set_volume(level)
+    return set_volume(VOLUME_QUIET)
+
+
+def classify_local_audio_command(text):
+    command = normalize_command(text)
+
+    if command in {
+        "can you repeat that", "repeat that", "say that again",
+        "say it again", "can you say that again",
+    }:
+        return ("repeat", None)
+
+    if command in {
+        "i cant hear you", "i cannot hear you", "cant hear you",
+        "what", "whaat", "whaaat", "what did you say",
+        "i didnt hear you", "i did not hear you",
+    }:
+        return ("louder_repeat", None)
+
+    if command in {
+        "too loud", "thats too loud", "that is too loud",
+        "please be quiet", "be quiet",
+    }:
+        return ("set", VOLUME_QUIET)
+
+    if command in {
+        "turn your volume down", "turn the volume down",
+        "turn yourself down", "volume down", "shh", "shhh", "shhhh",
+    }:
+        return ("quieter", None)
+
+    if command in {
+        "turn yourself up", "turn your volume up", "turn up the volume",
+        "turn the volume up", "volume up", "speak up",
+    }:
+        return ("louder", None)
+
+    if command in {
+        "maximum volume", "max volume", "full volume",
+        "turn it all the way up", "turn yourself all the way up",
+    }:
+        return ("set", VOLUME_EXTREME)
+
+    if command in {
+        "normal volume", "comfortable volume",
+        "set normal volume", "set comfortable volume",
+    }:
+        return ("set", VOLUME_DEFAULT)
+
+    match = re.fullmatch(
+        r"(?:set )?(?:your )?volume(?: to)? (\d{1,3})(?: percent)?",
+        command,
+    )
+    if match:
+        return ("set", int(match.group(1)))
+
+    return (None, None)
+
+
 def record_until_release(path):
     proc = subprocess.Popen(
         [
             "arecord",
             "-q",
             "-D",
-            ALSA_DEVICE,
+            CAPTURE_DEVICE,
             "-f",
             "S16_LE",
             "-r",
@@ -479,11 +595,14 @@ def piper_speak(text):
         )
 
 
-def speak(text):
+def speak(text, remember=True):
+    global last_spoken_text
+
+    if remember:
+        last_spoken_text = text
+
     try:
-        cloud_speak(
-            text
-        )
+        cloud_speak(text)
 
     except Exception as exc:
         print(
@@ -491,9 +610,52 @@ def speak(text):
             f"({type(exc).__name__}: {exc}); "
             "using Piper fallback."
         )
+        piper_speak(text)
 
-        piper_speak(
-            text
+
+def repeat_last_spoken():
+    if not last_spoken_text:
+        speak("I don't have anything to repeat yet.", remember=False)
+        return
+
+    print("Repeating previous response.")
+    speak(last_spoken_text, remember=False)
+
+
+def handle_local_audio_command(text):
+    action, value = classify_local_audio_command(text)
+
+    if not action:
+        return False
+
+    print(
+        "Local audio command: "
+        f"{action}"
+        + (f" ({value}%)" if value is not None else "")
+    )
+
+    if action == "repeat":
+        repeat_last_spoken()
+    elif action == "louder_repeat":
+        step_volume(1)
+        repeat_last_spoken()
+    elif action == "quieter":
+        step_volume(-1)
+    elif action == "louder":
+        step_volume(1)
+    elif action == "set":
+        set_volume(value)
+
+    return True
+
+
+def initialize_volume():
+    try:
+        set_volume(VOLUME_DEFAULT)
+    except Exception as exc:
+        print(
+            "Could not set default volume: "
+            f"{type(exc).__name__}: {exc}"
         )
 
 
@@ -618,13 +780,15 @@ def shutdown_box():
 
 def main():
     print(
-        "Talking Box V5.1 starting."
+        "Talking Box V5.2 starting."
     )
+
+    initialize_volume()
 
     run_wake_sequence()
 
     print(
-        "Talking Box V5.1 ready."
+        "Talking Box V5.2 ready."
     )
 
     print(
@@ -680,6 +844,11 @@ def main():
             ):
                 shutdown_box()
                 return
+
+            if handle_local_audio_command(
+                transcript
+            ):
+                continue
 
             print(
                 "Thinking..."
