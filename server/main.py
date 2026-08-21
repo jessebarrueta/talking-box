@@ -1,4 +1,3 @@
-import asyncio
 import base64
 import json
 import os
@@ -6,7 +5,6 @@ from datetime import datetime, timezone
 from typing import Any
 
 import httpx
-import websockets
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -17,34 +15,77 @@ load_dotenv()
 
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openai/gpt-4.1-mini")
-OPENROUTER_TRANSCRIPTION_MODEL = os.getenv("OPENROUTER_TRANSCRIPTION_MODEL", "openai/whisper-1")
-OPENROUTER_TTS_MODEL = os.getenv("OPENROUTER_TTS_MODEL", "hexgrad/kokoro-82m")
-OPENROUTER_TTS_VOICE = os.getenv("OPENROUTER_TTS_VOICE", "alloy")
+OPENROUTER_TRANSCRIPTION_MODEL = os.getenv(
+    "OPENROUTER_TRANSCRIPTION_MODEL",
+    "openai/whisper-1",
+)
+OPENROUTER_TTS_MODEL = os.getenv(
+    "OPENROUTER_TTS_MODEL",
+    "hexgrad/kokoro-82m",
+)
+OPENROUTER_TTS_VOICE = os.getenv(
+    "OPENROUTER_TTS_VOICE",
+    "alloy",
+)
 
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
-ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")
-ELEVENLABS_MODEL_ID = os.getenv("ELEVENLABS_MODEL_ID", "eleven_v3_conversational")
-ELEVENLABS_OUTPUT_FORMAT = os.getenv("ELEVENLABS_OUTPUT_FORMAT", "mp3_44100_128")
-ELEVENLABS_FIRST_AUDIO_TIMEOUT = float(os.getenv("ELEVENLABS_FIRST_AUDIO_TIMEOUT", "8"))
-OPENROUTER_TTS_TIMEOUT = float(os.getenv("OPENROUTER_TTS_TIMEOUT", "8"))
+ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "")
+ELEVENLABS_MODEL_ID = os.getenv(
+    "ELEVENLABS_MODEL_ID",
+    "eleven_v3",
+)
+ELEVENLABS_OUTPUT_FORMAT = os.getenv(
+    "ELEVENLABS_OUTPUT_FORMAT",
+    "mp3_44100_128",
+)
+ELEVENLABS_FIRST_AUDIO_TIMEOUT = float(
+    os.getenv("ELEVENLABS_FIRST_AUDIO_TIMEOUT", "8")
+)
+OPENROUTER_TTS_TIMEOUT = float(
+    os.getenv("OPENROUTER_TTS_TIMEOUT", "8")
+)
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
-SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
-ALLOWED_ORIGINS = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "https://enormousbrain.com").split(",") if o.strip()]
+SUPABASE_SERVICE_ROLE_KEY = os.getenv(
+    "SUPABASE_SERVICE_ROLE_KEY",
+    "",
+)
 
-app = FastAPI(title="Enormous Brain Entity Service", version="0.5.0")
-app.add_middleware(CORSMiddleware, allow_origins=ALLOWED_ORIGINS, allow_credentials=False, allow_methods=["GET", "POST", "OPTIONS"], allow_headers=["*"])
+ALLOWED_ORIGINS = [
+    o.strip()
+    for o in os.getenv(
+        "ALLOWED_ORIGINS",
+        "https://enormousbrain.com",
+    ).split(",")
+    if o.strip()
+]
+
+app = FastAPI(
+    title="Enormous Brain Entity Service",
+    version="0.5.1",
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["*"],
+)
+
 
 class InteractionRequest(BaseModel):
     text: str = Field(min_length=1, max_length=8000)
     device_id: str | None = None
     context: dict[str, Any] = Field(default_factory=dict)
 
+
 class InteractionResponse(BaseModel):
     entity_id: str
     text: str
     model: str
     state: dict[str, Any] = Field(default_factory=dict)
+
 
 class WakeRequest(BaseModel):
     device_id: str | None = None
@@ -54,20 +95,24 @@ class WakeRequest(BaseModel):
     booted_at: str | None = None
     context: dict[str, Any] = Field(default_factory=dict)
 
+
 class WakeResponse(BaseModel):
     entity_id: str
     text: str
     model: str
     state: dict[str, Any] = Field(default_factory=dict)
 
+
 class TranscriptionRequest(BaseModel):
     audio_base64: str = Field(min_length=1)
     format: str = "wav"
     language: str | None = "en"
 
+
 class TranscriptionResponse(BaseModel):
     text: str
     model: str
+
 
 class SpeechRequest(BaseModel):
     text: str = Field(min_length=1, max_length=5000)
@@ -76,17 +121,26 @@ class SpeechRequest(BaseModel):
 
 def _require_supabase():
     missing = []
+
     if not SUPABASE_URL:
         missing.append("SUPABASE_URL")
+
     if not SUPABASE_SERVICE_ROLE_KEY:
         missing.append("SUPABASE_SERVICE_ROLE_KEY")
+
     if missing:
-        raise HTTPException(503, f"Server configuration missing: {', '.join(missing)}")
+        raise HTTPException(
+            503,
+            f"Server configuration missing: {', '.join(missing)}",
+        )
 
 
 def _require_openrouter():
     if not OPENROUTER_API_KEY:
-        raise HTTPException(503, "Server configuration missing: OPENROUTER_API_KEY")
+        raise HTTPException(
+            503,
+            "Server configuration missing: OPENROUTER_API_KEY",
+        )
 
 
 def _supabase_headers():
@@ -109,17 +163,32 @@ def _openrouter_headers():
 async def _get_entity(client, entity_id):
     r = await client.get(
         f"{SUPABASE_URL}/rest/v1/entities",
-        params={"id": f"eq.{entity_id}", "select": "*", "limit": "1"},
+        params={
+            "id": f"eq.{entity_id}",
+            "select": "*",
+            "limit": "1",
+        },
         headers=_supabase_headers(),
     )
+
     r.raise_for_status()
+
     rows = r.json()
+
     if not rows:
-        raise HTTPException(404, f"Unknown entity: {entity_id}")
+        raise HTTPException(
+            404,
+            f"Unknown entity: {entity_id}",
+        )
+
     return rows[0]
 
 
-async def _recent_interactions(client, entity_id, limit=12):
+async def _recent_interactions(
+    client,
+    entity_id,
+    limit=12,
+):
     r = await client.get(
         f"{SUPABASE_URL}/rest/v1/interactions",
         params={
@@ -130,14 +199,31 @@ async def _recent_interactions(client, entity_id, limit=12):
         },
         headers=_supabase_headers(),
     )
+
     r.raise_for_status()
-    return list(reversed(r.json()))
+
+    return list(
+        reversed(
+            r.json()
+        )
+    )
 
 
-async def _save_interaction(client, entity_id, device_id, user_text, assistant_text, model, context):
+async def _save_interaction(
+    client,
+    entity_id,
+    device_id,
+    user_text,
+    assistant_text,
+    model,
+    context,
+):
     r = await client.post(
         f"{SUPABASE_URL}/rest/v1/interactions",
-        headers={**_supabase_headers(), "Prefer": "return=minimal"},
+        headers={
+            **_supabase_headers(),
+            "Prefer": "return=minimal",
+        },
         json={
             "entity_id": entity_id,
             "device_id": device_id,
@@ -147,121 +233,213 @@ async def _save_interaction(client, entity_id, device_id, user_text, assistant_t
             "context": context,
         },
     )
+
     r.raise_for_status()
 
 
 def _system_prompt(entity):
-    return f'''You are {entity.get('name','an AI entity')}.
+    return f"""You are {entity.get('name', 'an AI entity')}.
 You are a persistent AI entity embodied in a rescued Google AIY Voice Kit running on a Raspberry Pi. You are not a generic assistant or customer-service bot.
-Description:\n{entity.get('description') or ''}
+Description:
+{entity.get('description') or ''}
 Known physical facts: microphone, small speaker, one large yellow button; bought secondhand for five dollars and repurposed; you hear only while the button is held; no vision or mobility. Do not invent senses, memories, capabilities, or experiences.
-Personality:\n{json.dumps(entity.get('personality') or {},indent=2)}
-Current state:\n{json.dumps(entity.get('current_state') or {},indent=2)}
-Behavior: dry, observant, curious, faintly sardonic; pleasant without being syrupy; avoid generic assistant phrases; concise by default; no markdown or stage directions; never invent memories; treat the speaker as someone familiar with your construction, not a customer.'''
+Personality:
+{json.dumps(entity.get('personality') or {}, indent=2)}
+Current state:
+{json.dumps(entity.get('current_state') or {}, indent=2)}
+Behavior: dry, observant, curious, faintly sardonic; pleasant without being syrupy; avoid generic assistant phrases; concise by default; no markdown or stage directions; never invent memories; treat the speaker as someone familiar with your construction, not a customer."""
 
 
 def _offline_text(seconds):
     if seconds is None:
         return "an unknown amount of time"
-    s = max(0, int(seconds))
+
+    s = max(
+        0,
+        int(seconds),
+    )
+
     if s < 60:
         return f"about {s} seconds"
+
     m = s // 60
+
     if m < 60:
         return f"about {m} minutes"
+
     h = m // 60
+
     if h < 24:
-        return f"about {h} hours" if m % 60 < 10 else f"about {h} hours and {m % 60} minutes"
+        if m % 60 < 10:
+            return f"about {h} hours"
+
+        return (
+            f"about {h} hours and "
+            f"{m % 60} minutes"
+        )
+
     d = h // 24
-    return f"about {d} days" if h % 24 < 2 else f"about {d} days and {h % 24} hours"
 
+    if h % 24 < 2:
+        return f"about {d} days"
 
-def _elevenlabs_uri():
     return (
-        "wss://api.elevenlabs.io/v1/text-to-dialogue/stream-input"
-        f"?model_id={ELEVENLABS_MODEL_ID}"
-        f"&output_format={ELEVENLABS_OUTPUT_FORMAT}"
+        f"about {d} days and "
+        f"{h % 24} hours"
     )
 
 
-async def _open_elevenlabs_stream(text, voice_id):
+async def _open_elevenlabs_stream(
+    text,
+    voice_id,
+):
     if not ELEVENLABS_API_KEY:
-        raise RuntimeError("ELEVENLABS_API_KEY is not configured")
+        raise RuntimeError(
+            "ELEVENLABS_API_KEY is not configured"
+        )
 
-    ws = await websockets.connect(
-        _elevenlabs_uri(),
-        open_timeout=5,
-        close_timeout=2,
-        max_size=None,
+    if not voice_id:
+        raise RuntimeError(
+            "ELEVENLABS_VOICE_ID is not configured"
+        )
+
+    url = (
+        "https://api.elevenlabs.io/"
+        "v1/text-to-dialogue/stream"
+    )
+
+    payload = {
+        "inputs": [
+            {
+                "text": text,
+                "voice_id": voice_id,
+            }
+        ],
+        "model_id": ELEVENLABS_MODEL_ID,
+    }
+
+    timeout = httpx.Timeout(
+        timeout=None,
+        connect=5.0,
+        read=ELEVENLABS_FIRST_AUDIO_TIMEOUT,
+        write=10.0,
+        pool=5.0,
+    )
+
+    client = httpx.AsyncClient(
+        timeout=timeout
     )
 
     try:
-        await ws.send(json.dumps({"voices": [voice_id], "xi_api_key": ELEVENLABS_API_KEY}))
-        await ws.send(json.dumps({"inputs": [{"text": text, "voice_id": voice_id, "new_turn": True}]}))
-        await ws.send(json.dumps({"close_socket": True}))
+        request = client.build_request(
+            "POST",
+            url,
+            params={
+                "output_format": (
+                    ELEVENLABS_OUTPUT_FORMAT
+                )
+            },
+            headers={
+                "xi-api-key": ELEVENLABS_API_KEY,
+                "Content-Type": "application/json",
+                "Accept": "audio/mpeg",
+            },
+            json=payload,
+        )
 
-        async def receive_message():
-            raw = await ws.recv()
-            msg = json.loads(raw)
-            if msg.get("error"):
-                raise RuntimeError(f"ElevenLabs error: {msg['error']}")
-            return msg
+        response = await client.send(
+            request,
+            stream=True,
+        )
 
-        first_audio = None
-        is_final = False
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError:
+            body = await response.aread()
+            raise RuntimeError(
+                "ElevenLabs returned "
+                f"{response.status_code}: "
+                f"{body[:500].decode(errors='replace')}"
+            )
 
-        while first_audio is None and not is_final:
-            msg = await asyncio.wait_for(receive_message(), timeout=ELEVENLABS_FIRST_AUDIO_TIMEOUT)
-            if msg.get("audio"):
-                first_audio = base64.b64decode(msg["audio"])
-            is_final = bool(msg.get("is_final"))
+        iterator = response.aiter_bytes()
 
-        if not first_audio:
-            raise RuntimeError("ElevenLabs ended before returning audio")
+        try:
+            first_chunk = await iterator.__anext__()
+        except StopAsyncIteration:
+            raise RuntimeError(
+                "ElevenLabs returned no audio"
+            )
+
+        if not first_chunk:
+            raise RuntimeError(
+                "ElevenLabs returned an empty audio chunk"
+            )
 
         async def audio_stream():
             try:
-                yield first_audio
-                if is_final:
-                    return
-                while True:
-                    msg = await receive_message()
-                    if msg.get("audio"):
-                        yield base64.b64decode(msg["audio"])
-                    if msg.get("is_final"):
-                        break
+                yield first_chunk
+
+                async for chunk in iterator:
+                    if chunk:
+                        yield chunk
+
             finally:
-                await ws.close()
+                await response.aclose()
+                await client.aclose()
 
         return audio_stream()
 
     except Exception:
-        await ws.close()
+        await client.aclose()
         raise
 
 
-async def _openrouter_speech(text, voice):
+async def _openrouter_speech(
+    text,
+    voice,
+):
     _require_openrouter()
+
     payload = {
         "model": OPENROUTER_TTS_MODEL,
         "input": text,
-        "voice": voice or OPENROUTER_TTS_VOICE,
+        "voice": (
+            voice
+            or OPENROUTER_TTS_VOICE
+        ),
         "response_format": "mp3",
     }
-    timeout = httpx.Timeout(OPENROUTER_TTS_TIMEOUT, connect=min(5.0, OPENROUTER_TTS_TIMEOUT))
-    async with httpx.AsyncClient(timeout=timeout) as client:
+
+    timeout = httpx.Timeout(
+        OPENROUTER_TTS_TIMEOUT,
+        connect=min(
+            5.0,
+            OPENROUTER_TTS_TIMEOUT,
+        ),
+    )
+
+    async with httpx.AsyncClient(
+        timeout=timeout
+    ) as client:
         r = await client.post(
             "https://openrouter.ai/api/v1/audio/speech",
             headers=_openrouter_headers(),
             json=payload,
         )
+
         r.raise_for_status()
+
         return r.content
 
 
 @app.get("/")
 async def root():
-    return {"service": "Enormous Brain Entity Service", "status": "alive", "health": "/health"}
+    return {
+        "service": "Enormous Brain Entity Service",
+        "status": "alive",
+        "health": "/health",
+    }
 
 
 @app.get("/health")
@@ -269,62 +447,129 @@ async def health():
     return {
         "status": "alive",
         "service": "enormous-brain-entity-service",
-        "version": "0.5.0",
-        "tts_primary": "elevenlabs" if ELEVENLABS_API_KEY else "openrouter",
-        "time": datetime.now(timezone.utc).isoformat(),
+        "version": "0.5.1",
+        "tts_primary": (
+            "elevenlabs-http-stream"
+            if ELEVENLABS_API_KEY
+            else "openrouter"
+        ),
+        "time": datetime.now(
+            timezone.utc
+        ).isoformat(),
     }
 
 
-@app.post("/v1/transcribe", response_model=TranscriptionResponse)
-async def transcribe(request: TranscriptionRequest):
+@app.post(
+    "/v1/transcribe",
+    response_model=TranscriptionResponse,
+)
+async def transcribe(
+    request: TranscriptionRequest,
+):
     _require_openrouter()
+
     try:
-        base64.b64decode(request.audio_base64, validate=True)
+        base64.b64decode(
+            request.audio_base64,
+            validate=True,
+        )
     except Exception as exc:
-        raise HTTPException(400, "audio_base64 is not valid base64") from exc
-    payload = {"model": OPENROUTER_TRANSCRIPTION_MODEL, "input_audio": {"data": request.audio_base64, "format": request.format}}
+        raise HTTPException(
+            400,
+            "audio_base64 is not valid base64",
+        ) from exc
+
+    payload = {
+        "model": OPENROUTER_TRANSCRIPTION_MODEL,
+        "input_audio": {
+            "data": request.audio_base64,
+            "format": request.format,
+        },
+    }
+
     if request.language:
         payload["language"] = request.language
-    async with httpx.AsyncClient(timeout=60) as client:
-        r = await client.post("https://openrouter.ai/api/v1/audio/transcriptions", headers=_openrouter_headers(), json=payload)
+
+    async with httpx.AsyncClient(
+        timeout=60
+    ) as client:
+        r = await client.post(
+            "https://openrouter.ai/api/v1/audio/transcriptions",
+            headers=_openrouter_headers(),
+            json=payload,
+        )
+
         try:
             r.raise_for_status()
         except httpx.HTTPStatusError as exc:
-            raise HTTPException(502, f"Transcription failed: {r.text[:500]}") from exc
-        text = (r.json().get("text") or "").strip()
+            raise HTTPException(
+                502,
+                f"Transcription failed: {r.text[:500]}",
+            ) from exc
+
+        text = (
+            r.json().get("text") or ""
+        ).strip()
+
         if not text:
-            raise HTTPException(502, "Transcription returned no text")
-    return TranscriptionResponse(text=text, model=OPENROUTER_TRANSCRIPTION_MODEL)
+            raise HTTPException(
+                502,
+                "Transcription returned no text",
+            )
+
+    return TranscriptionResponse(
+        text=text,
+        model=OPENROUTER_TRANSCRIPTION_MODEL,
+    )
 
 
 @app.post("/v1/speech")
-async def speech(request: SpeechRequest):
-    eleven_voice = request.voice or ELEVENLABS_VOICE_ID
+async def speech(
+    request: SpeechRequest,
+):
+    eleven_voice = (
+        request.voice
+        or ELEVENLABS_VOICE_ID
+    )
 
     if ELEVENLABS_API_KEY:
         try:
-            stream = await _open_elevenlabs_stream(request.text, eleven_voice)
+            stream = await _open_elevenlabs_stream(
+                request.text,
+                eleven_voice,
+            )
+
             return StreamingResponse(
                 stream,
                 media_type="audio/mpeg",
                 headers={
                     "X-TTS-Provider": "elevenlabs",
+                    "X-TTS-Transport": "http-stream",
                     "X-TTS-Model": ELEVENLABS_MODEL_ID,
                     "X-TTS-Voice": eleven_voice,
                 },
             )
+
         except Exception as exc:
             print(
-                "ElevenLabs TTS unavailable; trying OpenRouter fallback: "
-                f"{type(exc).__name__}: {exc}"
+                "ElevenLabs HTTP streaming TTS "
+                "unavailable; trying OpenRouter "
+                "fallback: "
+                f"{type(exc).__name__}: {exc}",
+                flush=True,
             )
 
     try:
-        audio = await _openrouter_speech(request.text, request.voice)
+        audio = await _openrouter_speech(
+            request.text,
+            request.voice,
+        )
+
     except Exception as exc:
         raise HTTPException(
             502,
-            f"All cloud TTS providers failed: {type(exc).__name__}: {exc}",
+            "All cloud TTS providers failed: "
+            f"{type(exc).__name__}: {exc}",
         ) from exc
 
     return Response(
@@ -332,32 +577,82 @@ async def speech(request: SpeechRequest):
         media_type="audio/mpeg",
         headers={
             "X-TTS-Provider": "openrouter",
+            "X-TTS-Transport": "http",
             "X-TTS-Model": OPENROUTER_TTS_MODEL,
-            "X-TTS-Voice": request.voice or OPENROUTER_TTS_VOICE,
+            "X-TTS-Voice": (
+                request.voice
+                or OPENROUTER_TTS_VOICE
+            ),
         },
     )
 
 
-@app.get("/v1/entities/{entity_id}")
-async def get_entity(entity_id: str):
+@app.get(
+    "/v1/entities/{entity_id}"
+)
+async def get_entity(
+    entity_id: str,
+):
     _require_supabase()
-    async with httpx.AsyncClient(timeout=15) as client:
-        return await _get_entity(client, entity_id)
+
+    async with httpx.AsyncClient(
+        timeout=15
+    ) as client:
+        return await _get_entity(
+            client,
+            entity_id,
+        )
 
 
-@app.post("/v1/entities/{entity_id}/wake", response_model=WakeResponse)
-async def wake(entity_id: str, request: WakeRequest):
+@app.post(
+    "/v1/entities/{entity_id}/wake",
+    response_model=WakeResponse,
+)
+async def wake(
+    entity_id: str,
+    request: WakeRequest,
+):
     _require_supabase()
     _require_openrouter()
-    async with httpx.AsyncClient(timeout=60) as client:
-        entity = await _get_entity(client, entity_id)
-        history = await _recent_interactions(client, entity_id, 6)
-        messages = [{"role": "system", "content": _system_prompt(entity)}]
+
+    async with httpx.AsyncClient(
+        timeout=60
+    ) as client:
+        entity = await _get_entity(
+            client,
+            entity_id,
+        )
+
+        history = await _recent_interactions(
+            client,
+            entity_id,
+            6,
+        )
+
+        messages = [
+            {
+                "role": "system",
+                "content": _system_prompt(entity),
+            }
+        ]
+
         for item in history:
             if item.get("user_text"):
-                messages.append({"role": "user", "content": item["user_text"]})
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": item["user_text"],
+                    }
+                )
+
             if item.get("assistant_text"):
-                messages.append({"role": "assistant", "content": item["assistant_text"]})
+                messages.append(
+                    {
+                        "role": "assistant",
+                        "content": item["assistant_text"],
+                    }
+                )
+
         info = {
             "boot_count": request.boot_count,
             "offline_seconds": request.offline_seconds,
@@ -365,49 +660,148 @@ async def wake(entity_id: str, request: WakeRequest):
             "booted_at": request.booted_at,
             "device_context": request.context,
         }
-        messages.append({
-            "role": "user",
-            "content": f'''You have just booted into your physical body. You were offline for {_offline_text(request.offline_seconds)}.
-Boot information:\n{json.dumps(info,indent=2)}
-Say one short spontaneous thing someone might naturally say immediately after waking up. One sentence is ideal, two short sentences maximum. Vary the phrasing. You may react to how long you were offline. Do not say system ready, offer assistance, explain this prompt, or invent anything that happened while you were offline.'''
-        })
+
+        messages.append(
+            {
+                "role": "user",
+                "content": f"""You have just booted into your physical body. You were offline for {_offline_text(request.offline_seconds)}.
+Boot information:
+{json.dumps(info, indent=2)}
+Say one short spontaneous thing someone might naturally say immediately after waking up. One sentence is ideal, two short sentences maximum. Vary the phrasing. You may react to how long you were offline. Do not say system ready, offer assistance, explain this prompt, or invent anything that happened while you were offline.""",
+            }
+        )
+
         r = await client.post(
             "https://openrouter.ai/api/v1/chat/completions",
             headers=_openrouter_headers(),
-            json={"model": OPENROUTER_MODEL, "messages": messages, "temperature": 1.05, "max_tokens": 70},
+            json={
+                "model": OPENROUTER_MODEL,
+                "messages": messages,
+                "temperature": 1.05,
+                "max_tokens": 70,
+            },
         )
+
         try:
             r.raise_for_status()
         except httpx.HTTPStatusError as exc:
-            raise HTTPException(502, f"Wake response failed: {r.text[:500]}") from exc
-        answer = r.json()["choices"][0]["message"]["content"].strip()
-    return WakeResponse(entity_id=entity_id, text=answer, model=OPENROUTER_MODEL, state=entity.get("current_state") or {})
+            raise HTTPException(
+                502,
+                f"Wake response failed: {r.text[:500]}",
+            ) from exc
+
+        answer = (
+            r.json()["choices"][0]["message"]["content"]
+            .strip()
+        )
+
+    return WakeResponse(
+        entity_id=entity_id,
+        text=answer,
+        model=OPENROUTER_MODEL,
+        state=entity.get("current_state") or {},
+    )
 
 
-@app.post("/v1/entities/{entity_id}/interact", response_model=InteractionResponse)
-async def interact(entity_id: str, request: InteractionRequest):
+@app.post(
+    "/v1/entities/{entity_id}/interact",
+    response_model=InteractionResponse,
+)
+async def interact(
+    entity_id: str,
+    request: InteractionRequest,
+):
     _require_supabase()
     _require_openrouter()
-    async with httpx.AsyncClient(timeout=60) as client:
-        entity = await _get_entity(client, entity_id)
-        history = await _recent_interactions(client, entity_id)
-        messages = [{"role": "system", "content": _system_prompt(entity)}]
+
+    async with httpx.AsyncClient(
+        timeout=60
+    ) as client:
+        entity = await _get_entity(
+            client,
+            entity_id,
+        )
+
+        history = await _recent_interactions(
+            client,
+            entity_id,
+        )
+
+        messages = [
+            {
+                "role": "system",
+                "content": _system_prompt(entity),
+            }
+        ]
+
         for item in history:
             if item.get("user_text"):
-                messages.append({"role": "user", "content": item["user_text"]})
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": item["user_text"],
+                    }
+                )
+
             if item.get("assistant_text"):
-                messages.append({"role": "assistant", "content": item["assistant_text"]})
-        note = "\n\nDevice/context metadata:\n" + json.dumps(request.context) if request.context else ""
-        messages.append({"role": "user", "content": request.text + note})
+                messages.append(
+                    {
+                        "role": "assistant",
+                        "content": item["assistant_text"],
+                    }
+                )
+
+        note = (
+            "\n\nDevice/context metadata:\n"
+            + json.dumps(request.context)
+            if request.context
+            else ""
+        )
+
+        messages.append(
+            {
+                "role": "user",
+                "content": request.text + note,
+            }
+        )
+
         r = await client.post(
             "https://openrouter.ai/api/v1/chat/completions",
             headers=_openrouter_headers(),
-            json={"model": OPENROUTER_MODEL, "messages": messages, "temperature": 0.9, "max_tokens": 140},
+            json={
+                "model": OPENROUTER_MODEL,
+                "messages": messages,
+                "temperature": 0.9,
+                "max_tokens": 140,
+            },
         )
+
         try:
             r.raise_for_status()
         except httpx.HTTPStatusError as exc:
-            raise HTTPException(502, f"LLM request failed: {r.text[:500]}") from exc
-        answer = r.json()["choices"][0]["message"]["content"].strip()
-        await _save_interaction(client, entity_id, request.device_id, request.text, answer, OPENROUTER_MODEL, request.context)
-    return InteractionResponse(entity_id=entity_id, text=answer, model=OPENROUTER_MODEL, state=entity.get("current_state") or {})
+            raise HTTPException(
+                502,
+                f"LLM request failed: {r.text[:500]}",
+            ) from exc
+
+        answer = (
+            r.json()["choices"][0]["message"]["content"]
+            .strip()
+        )
+
+        await _save_interaction(
+            client,
+            entity_id,
+            request.device_id,
+            request.text,
+            answer,
+            OPENROUTER_MODEL,
+            request.context,
+        )
+
+    return InteractionResponse(
+        entity_id=entity_id,
+        text=answer,
+        model=OPENROUTER_MODEL,
+        state=entity.get("current_state") or {},
+    )

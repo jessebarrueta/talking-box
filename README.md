@@ -1,75 +1,76 @@
-# Enormous Brain Talking Box V5
+# Enormous Brain Talking Box V5.1
 
-V5 makes ElevenLabs Eleven v3 Conversational the primary cloud voice and streams MP3 audio to the Pi while it is generated.
+V5.1 replaces the ElevenLabs WebSocket transport with ElevenLabs' **HTTP streaming Text-to-Dialogue endpoint**.
 
-## V5 additions
+## Why
 
-- ElevenLabs Text-to-Dialogue WebSocket
-- `eleven_v3_conversational`
-- server-to-Pi streaming audio
-- Pi pipes MP3 chunks directly into `mpg123`
-- OpenRouter/Kokoro remains a short-timeout cloud fallback
-- Piper remains the final local fallback
-- server version `0.5.0`
+The full reply text is already available before TTS starts, so a WebSocket is unnecessary. ElevenLabs explicitly supports HTTP streaming dialogue for this use case.
 
-The speech path is:
+The speech path is now:
 
 ```text
-entity reply
-  ↓
-ElevenLabs v3 conversational WebSocket
-  ↓
-MP3 chunks
-  ↓
-HTTP StreamingResponse
-  ↓
-Pi → mpg123 → AIY speaker
-
-ElevenLabs first-audio timeout
-  ↓
-OpenRouter/Kokoro short fallback
-  ↓
-Piper local fallback
+entity reply text
+    ↓
+POST ElevenLabs /v1/text-to-dialogue/stream
+    ↓
+streaming MP3 response
+    ↓
+Enormous Brain StreamingResponse
+    ↓
+Pi streams chunks into mpg123
+    ↓
+AIY speaker
 ```
 
-## ElevenLabs setup
+## V5.1 changes
 
-Add these environment variables to the cPanel Python app:
+- ElevenLabs HTTP streaming instead of WebSocket
+- `POST https://api.elevenlabs.io/v1/text-to-dialogue/stream`
+- server streams ElevenLabs audio directly to the Pi
+- OpenRouter/Kokoro remains a short-timeout cloud fallback
+- Piper remains the final local fallback
+- removed `websockets` Python dependency
+- removed the Pi's incorrect 5-second `mpg123` playback timeout
+- provider/transport are printed in Pi logs
+- server version `0.5.1`
+
+## ElevenLabs environment
+
+Required:
 
 ```text
 ELEVENLABS_API_KEY=...
 ELEVENLABS_VOICE_ID=...
 ```
 
-Optional:
+Recommended:
 
 ```text
-ELEVENLABS_MODEL_ID=eleven_v3_conversational
+ELEVENLABS_MODEL_ID=eleven_v3
 ELEVENLABS_OUTPUT_FORMAT=mp3_44100_128
 ELEVENLABS_FIRST_AUDIO_TIMEOUT=8
-OPENROUTER_TTS_TIMEOUT=8
 ```
 
-If `ELEVENLABS_VOICE_ID` is omitted, V5 uses the ElevenLabs documentation example voice ID `21m00Tcm4TlvDq8ikWAM`. For the actual entity, set the voice you want explicitly.
-
-The ElevenLabs API key stays on the server. Do not put it on the Pi.
+The HTTP Text-to-Dialogue API defaults to `eleven_v3`. If your ElevenLabs workspace specifically supports another v3 model ID, it can still be supplied with `ELEVENLABS_MODEL_ID`.
 
 ## Server deployment
 
-Update:
+Replace:
 
 ```text
 server/main.py
 server/requirements.txt
 ```
 
-Install the new dependency in the cPanel Python application's virtualenv:
+in the GoDaddy Python application.
+
+Then update dependencies:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-Then restart the cPanel Python application.
+Restart the cPanel Python application.
 
 Verify:
 
@@ -77,27 +78,28 @@ Verify:
 curl https://api.enormousbrain.com/health
 ```
 
-Expected version:
+Expected:
 
-```text
-0.5.0
+```json
+{
+  "version": "0.5.1",
+  "tts_primary": "elevenlabs-http-stream"
+}
 ```
 
-and, when the ElevenLabs key is configured:
-
-```text
-"tts_primary":"elevenlabs"
-```
-
-## Mac speech test
+## Test the API from your Mac
 
 ```bash
 curl -sS -N -D /tmp/talking-box-headers.txt \
   -X POST https://api.enormousbrain.com/v1/speech \
   -H 'Content-Type: application/json' \
-  -d '{"text":"Oh. This is significantly more responsive."}' \
+  -d '{"text":"Oh. HTTP streaming. Much less dramatic."}' \
   -o /tmp/talking-box-test.mp3
+```
 
+Inspect:
+
+```bash
 cat /tmp/talking-box-headers.txt
 file /tmp/talking-box-test.mp3
 afplay /tmp/talking-box-test.mp3
@@ -107,12 +109,13 @@ A successful ElevenLabs response should include:
 
 ```text
 X-TTS-Provider: elevenlabs
-X-TTS-Model: eleven_v3_conversational
+X-TTS-Transport: http-stream
+X-TTS-Model: eleven_v3
 ```
 
 ## Pi deployment
 
-After pushing V5 to GitHub:
+After pushing the Pi file:
 
 ```bash
 cd /home/jesse/talking-box
@@ -125,28 +128,26 @@ Then:
 journalctl -u talking-box.service -f
 ```
 
-A successful spoken response should log:
+A healthy response should look like:
 
 ```text
-Cloud TTS: elevenlabs / eleven_v3_conversational
+Cloud TTS: elevenlabs / eleven_v3 via http-stream
 ```
 
-The wake-up sequence uses this same speech path, so the startup greeting should also use ElevenLabs when available.
+## Playback timeout fix
 
-## Notes on ElevenLabs v3 streaming
+V5 had:
 
-The server uses ElevenLabs' Text-to-Dialogue WebSocket endpoint:
-
-```text
-wss://api.elevenlabs.io/v1/text-to-dialogue/stream-input
+```python
+player.wait(timeout=5)
 ```
 
-with one registered voice for `eleven_v3_conversational`.
+That could incorrectly kill `mpg123` simply because a sentence took more than five seconds to finish playing.
 
-The request is flushed with `close_socket` after one entity turn, while audio chunks are streamed back as they are generated.
+V5.1 lets `mpg123` naturally finish the already-received audio:
 
-## Fallback behavior
+```python
+player.wait()
+```
 
-ElevenLabs gets a short first-audio deadline. If it cannot begin speaking quickly, the server tries OpenRouter/Kokoro briefly. If cloud speech still fails, the Pi falls back to Piper.
-
-This prevents a slow provider from freezing the entity for roughly a minute.
+The network itself still has explicit connection/read timeouts, so this does not reintroduce the old minute-long cloud stall.
