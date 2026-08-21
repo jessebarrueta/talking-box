@@ -434,6 +434,7 @@ async def _save_memory(
     payload = {
         "entity_id": entity_id,
         "memory_type": memory_type,
+        "content": summary[:1000],
         "summary": summary[:1000],
         "importance": round(importance, 3),
         "metadata": {
