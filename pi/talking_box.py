@@ -7,6 +7,7 @@ from gpiozero import Button
 
 API_BASE='https://api.enormousbrain.com'; ENTITY_ID='voice-box-001'; DEVICE_ID='aiy-voice-pi4-001'
 BUTTON_GPIO=23; ALSA_DEVICE='plughw:CARD=sndrpigooglevoi'; RECORD_RATE=16000; MAX_RECORD_SECONDS=45; HTTP_TIMEOUT=75
+SPEECH_CONNECT_TIMEOUT=6; SPEECH_READ_TIMEOUT=20
 PIPER=str(Path.home()/'piper-venv'/'bin'/'piper'); PIPER_MODEL=str(Path.home()/'piper-voices'/'en_US-lessac-medium.onnx')
 STATE_FILE=Path.home()/'.talking_box_state.json'; STARTUP_API_RETRIES=12; STARTUP_API_RETRY_SECONDS=5
 SHUTDOWN_COMMAND=['sudo','/usr/sbin/shutdown','-h','now']
@@ -50,11 +51,36 @@ def interact(text):
     r=requests.post(f'{API_BASE}/v1/entities/{ENTITY_ID}/interact',json={'text':text,'device_id':DEVICE_ID,'context':device_context()},timeout=HTTP_TIMEOUT); r.raise_for_status(); return r.json()['text'].strip()
 def wake_greeting(info):
     r=requests.post(f'{API_BASE}/v1/entities/{ENTITY_ID}/wake',json={'device_id':DEVICE_ID,**info,'context':device_context()},timeout=HTTP_TIMEOUT); r.raise_for_status(); return r.json()['text'].strip()
+
 def cloud_speak(text):
-    r=requests.post(f'{API_BASE}/v1/speech',json={'text':text},timeout=HTTP_TIMEOUT); r.raise_for_status()
-    with tempfile.NamedTemporaryFile(suffix='.mp3',delete=False) as tmp: path=tmp.name; tmp.write(r.content)
-    try: subprocess.run(['mpg123','-q','-o','alsa','-a',ALSA_DEVICE,path],check=True)
-    finally: Path(path).unlink(missing_ok=True)
+    with requests.post(
+        f'{API_BASE}/v1/speech',
+        json={'text':text},
+        stream=True,
+        timeout=(SPEECH_CONNECT_TIMEOUT,SPEECH_READ_TIMEOUT),
+    ) as r:
+        r.raise_for_status()
+        provider=r.headers.get('X-TTS-Provider','unknown'); model=r.headers.get('X-TTS-Model','unknown')
+        print(f'Cloud TTS: {provider} / {model}')
+        player=subprocess.Popen(['mpg123','-q','-o','alsa','-a',ALSA_DEVICE,'-'],stdin=subprocess.PIPE)
+        started=False
+        try:
+            for chunk in r.iter_content(chunk_size=4096):
+                if not chunk: continue
+                started=True; player.stdin.write(chunk); player.stdin.flush()
+            player.stdin.close(); code=player.wait(timeout=5)
+            if code!=0: raise RuntimeError(f'mpg123 exited with status {code}')
+            if not started: raise RuntimeError('cloud TTS returned no audio')
+        except Exception:
+            try:
+                if player.stdin: player.stdin.close()
+            except Exception: pass
+            if player.poll() is None:
+                player.terminate()
+                try: player.wait(timeout=2)
+                except subprocess.TimeoutExpired: player.kill(); player.wait()
+            raise
+
 def piper_speak(text):
     with tempfile.NamedTemporaryFile(suffix='.wav',delete=False) as tmp: path=tmp.name
     try:
@@ -63,7 +89,7 @@ def piper_speak(text):
     finally: Path(path).unlink(missing_ok=True)
 def speak(text):
     try: cloud_speak(text)
-    except Exception as exc: print(f'Cloud TTS failed ({exc}); using Piper fallback.'); piper_speak(text)
+    except Exception as exc: print(f'Cloud TTS failed ({type(exc).__name__}: {exc}); using Piper fallback.'); piper_speak(text)
 
 def wait_for_api():
     for attempt in range(1,STARTUP_API_RETRIES+1):
@@ -94,7 +120,7 @@ def shutdown_box():
     remember_shutdown(); time.sleep(.5); subprocess.run(SHUTDOWN_COMMAND,check=True)
 
 def main():
-    print('Talking Box V4 starting.'); run_wake_sequence(); print('Talking Box V4 ready.'); print('Hold the yellow button to talk. Release when finished.')
+    print('Talking Box V5 starting.'); run_wake_sequence(); print('Talking Box V5 ready.'); print('Hold the yellow button to talk. Release when finished.')
     while True:
         button.wait_for_press()
         with tempfile.NamedTemporaryFile(suffix='.wav',delete=False) as tmp: input_path=tmp.name
