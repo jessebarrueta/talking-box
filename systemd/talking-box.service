@@ -6,10 +6,10 @@ After=network-online.target sound.target
 [Service]
 Type=simple
 User=jesse
-WorkingDirectory=/home/jesse
+WorkingDirectory=/home/jesse/talking-box
 Environment=GPIOZERO_PIN_FACTORY=lgpio
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/home/jesse/piper-venv/bin/python /home/jesse/talking_box.py
+ExecStart=/home/jesse/piper-venv/bin/python /home/jesse/talking-box/pi/talking_box.py
 Restart=on-failure
 RestartSec=3
 
