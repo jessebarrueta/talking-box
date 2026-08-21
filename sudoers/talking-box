@@ -1,0 +1,1 @@
+jesse ALL=(root) NOPASSWD: /usr/sbin/shutdown -h now

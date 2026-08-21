@@ -1,0 +1,17 @@
+[Unit]
+Description=Enormous Brain Talking Box
+Wants=network-online.target
+After=network-online.target sound.target
+
+[Service]
+Type=simple
+User=jesse
+WorkingDirectory=/home/jesse
+Environment=GPIOZERO_PIN_FACTORY=lgpio
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/jesse/piper-venv/bin/python /home/jesse/talking_box.py
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
