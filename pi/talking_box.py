@@ -16,7 +16,7 @@ ENTITY_ID = "voice-box-001"
 DEVICE_ID = "aiy-voice-pi4-001"
 
 BUTTON_GPIO = 23
-ALSA_DEVICE = "plughw:CARD=sndrpigooglevoi"
+ALSA_DEVICE = "talkingbox"
 RECORD_RATE = 16000
 MAX_RECORD_SECONDS = 45
 
