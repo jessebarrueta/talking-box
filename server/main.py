@@ -552,33 +552,60 @@ async def _pending_social_messages(client, entity_id, speaker, limit=5):
     ):
         return []
 
-    r = await client.get(
-        f"{SUPABASE_URL}/rest/v1/social_messages",
-        params={
-            "entity_id": f"eq.{entity_id}",
-            "recipient_speaker_id": f"eq.{speaker['id']}",
-            "status": "eq.pending",
-            "select": (
-                "id,sender_status,sender_speaker_id,sender_display_name,"
-                "sender_anonymous_key,recipient_speaker_id,"
-                "recipient_display_name,message_text,created_at"
-            ),
-            "order": "created_at.asc",
-            "limit": str(limit),
-        },
-        headers=_supabase_headers(),
-    )
-
-    if _mailbox_missing(r):
+    try:
+        r = await client.get(
+            f"{SUPABASE_URL}/rest/v1/social_messages",
+            params={
+                "entity_id": f"eq.{entity_id}",
+                "recipient_speaker_id": f"eq.{speaker['id']}",
+                "status": "eq.pending",
+                "select": (
+                    "id,sender_status,sender_speaker_id,sender_display_name,"
+                    "sender_anonymous_key,recipient_speaker_id,"
+                    "recipient_display_name,message_text,created_at"
+                ),
+                "order": "created_at.asc",
+                "limit": str(limit),
+            },
+            headers=_supabase_headers(),
+        )
+    except httpx.HTTPError as exc:
         print(
-            "Social mailbox table is not installed; "
-            "run supabase/v7_2_social_messages.sql",
+            "Social mailbox lookup transport failure; "
+            "continuing without mailbox: "
+            f"{type(exc).__name__}: {exc}",
             flush=True,
         )
         return []
 
-    r.raise_for_status()
-    return r.json()
+    if not r.is_success:
+        print(
+            "Social mailbox lookup failed; continuing without mailbox: "
+            f"HTTP {r.status_code}: {r.text[:500]}",
+            flush=True,
+        )
+        return []
+
+    try:
+        rows = r.json()
+    except ValueError as exc:
+        print(
+            "Social mailbox returned invalid JSON; "
+            "continuing without mailbox: "
+            f"{type(exc).__name__}: {exc}",
+            flush=True,
+        )
+        return []
+
+    if not isinstance(rows, list):
+        print(
+            "Social mailbox returned an unexpected payload; "
+            "continuing without mailbox.",
+            flush=True,
+        )
+        return []
+
+    return rows
 
 
 def _pending_message_prompt_view(message):
