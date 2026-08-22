@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import base64
 import json
+import os
 import re
 import subprocess
 import tempfile
@@ -10,6 +11,13 @@ from pathlib import Path
 
 import requests
 from gpiozero import Button
+
+try:
+    from speaker_identity import SpeakerIdentity
+except Exception as speaker_import_error:
+    SpeakerIdentity = None
+else:
+    speaker_import_error = None
 
 API_BASE = "https://api.enormousbrain.com"
 ENTITY_ID = "voice-box-001"
@@ -35,6 +43,20 @@ VOLUME_LEVELS = [
 ]
 RECORD_RATE = 16000
 MAX_RECORD_SECONDS = 45
+
+SPEAKER_ID_ENABLED = os.getenv(
+    "TALKING_BOX_SPEAKER_ID",
+    "1",
+).strip().lower() not in {
+    "0", "false", "no", "off",
+}
+
+SPEAKER_MODEL = (
+    Path(__file__).resolve().parent.parent
+    / "models"
+    / "speaker"
+    / "wespeaker_en_voxceleb_resnet34.onnx"
+)
 
 HTTP_TIMEOUT = 75
 SPEECH_CONNECT_TIMEOUT = 6
@@ -75,6 +97,7 @@ button = Button(
 )
 
 last_spoken_text = None
+speaker_identity = None
 
 
 def utc_now():
@@ -395,6 +418,67 @@ def transcribe(path):
     return r.json()["text"].strip()
 
 
+def initialize_speaker_identity():
+    global speaker_identity
+
+    if not SPEAKER_ID_ENABLED:
+        print("Speaker identity disabled by configuration.")
+        return
+
+    if SpeakerIdentity is None:
+        print(
+            "Speaker identity unavailable: "
+            f"{type(speaker_import_error).__name__}: "
+            f"{speaker_import_error}"
+        )
+        return
+
+    if not SPEAKER_MODEL.is_file():
+        print(
+            "Speaker identity model not installed; "
+            "run ./pi/setup-speaker-id.sh"
+        )
+        return
+
+    try:
+        speaker_identity = SpeakerIdentity(model_path=SPEAKER_MODEL)
+        enrolled = speaker_identity.list_speakers()
+        print(
+            "Speaker identity ready: "
+            f"{len(enrolled)} enrolled speaker(s)."
+        )
+    except Exception as exc:
+        speaker_identity = None
+        print(
+            "Speaker identity initialization failed: "
+            f"{type(exc).__name__}: {exc}"
+        )
+
+
+def identify_speaker(path):
+    if speaker_identity is None:
+        return {
+            "status": "unavailable",
+            "id": None,
+            "display_name": None,
+        }
+
+    try:
+        result = speaker_identity.identify(path)
+        print("Speaker identity: " + json.dumps(result, sort_keys=True))
+        return result
+    except Exception as exc:
+        print(
+            "Speaker identity failed: "
+            f"{type(exc).__name__}: {exc}"
+        )
+        return {
+            "status": "error",
+            "id": None,
+            "display_name": None,
+        }
+
+
 def device_context():
     return {
         "embodiment": (
@@ -415,7 +499,11 @@ def device_context():
     }
 
 
-def interact(text):
+def interact(text, speaker=None):
+    context = device_context()
+    if speaker:
+        context["speaker"] = speaker
+
     r = requests.post(
         (
             f"{API_BASE}/v1/entities/"
@@ -424,7 +512,7 @@ def interact(text):
         json={
             "text": text,
             "device_id": DEVICE_ID,
-            "context": device_context(),
+            "context": context,
         },
         timeout=HTTP_TIMEOUT,
     )
@@ -784,6 +872,7 @@ def main():
     )
 
     initialize_volume()
+    initialize_speaker_identity()
 
     run_wake_sequence()
 
@@ -824,6 +913,10 @@ def main():
 
                 continue
 
+            speaker = identify_speaker(
+                input_path
+            )
+
             print(
                 "Transcribing..."
             )
@@ -855,7 +948,8 @@ def main():
             )
 
             reply = interact(
-                transcript
+                transcript,
+                speaker,
             )
 
             print(

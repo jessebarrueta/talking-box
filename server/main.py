@@ -247,12 +247,72 @@ def _settle_state_after_offline(state, seconds):
     return settled
 
 
+def _speaker_from_context(context):
+    if not isinstance(context, dict):
+        return None
+
+    raw = context.get("speaker")
+    if not isinstance(raw, dict):
+        return None
+
+    status = str(raw.get("status") or "").strip().lower()
+    speaker_id = str(raw.get("id") or "").strip() or None
+    display_name = (
+        str(raw.get("display_name") or "").strip()
+        or speaker_id
+    )
+
+    speaker = {
+        "status": status or "unknown",
+        "id": speaker_id,
+        "display_name": display_name,
+    }
+
+    for key in ("similarity", "margin", "threshold"):
+        try:
+            if raw.get(key) is not None:
+                speaker[key] = round(float(raw[key]), 4)
+        except (TypeError, ValueError):
+            pass
+
+    return speaker
+
+
 def _memory_view(memory):
-    return {
+    view = {
         "type": memory.get("memory_type") or "fact",
         "summary": memory.get("summary") or "",
         "importance": float(memory.get("importance") or 0.5),
     }
+
+    metadata = memory.get("metadata")
+    if isinstance(metadata, dict):
+        speaker = metadata.get("speaker")
+        if isinstance(speaker, dict):
+            view["speaker"] = speaker
+
+    return view
+
+
+def _history_user_content(item):
+    text = item.get("user_text") or ""
+    speaker = _speaker_from_context(item.get("context"))
+
+    if not speaker:
+        return text
+
+    if speaker.get("status") == "recognized":
+        label = (
+            speaker.get("display_name")
+            or speaker.get("id")
+            or "recognized speaker"
+        )
+        return f"[Speaker: {label}] {text}"
+
+    if speaker.get("status") == "unknown":
+        return f"[Speaker: unknown] {text}"
+
+    return text
 
 
 def _tokens(text):
@@ -297,7 +357,7 @@ async def _recent_interactions(client, entity_id, limit=12):
         f"{SUPABASE_URL}/rest/v1/interactions",
         params={
             "entity_id": f"eq.{entity_id}",
-            "select": "user_text,assistant_text,created_at",
+            "select": "user_text,assistant_text,context,created_at",
             "order": "created_at.desc",
             "limit": str(limit),
         },
@@ -398,6 +458,7 @@ async def _save_memory(
     memory,
     user_text,
     assistant_text,
+    context,
 ):
     if not isinstance(memory, dict) or not memory.get("remember"):
         return None
@@ -440,7 +501,8 @@ async def _save_memory(
         "metadata": {
             "source_user_text": user_text[:2000],
             "source_assistant_text": assistant_text[:2000],
-            "created_by": "interaction-reflection-v1",
+            "created_by": "interaction-reflection-v2-speaker-aware",
+            "speaker": _speaker_from_context(context),
         },
     }
 
@@ -533,6 +595,10 @@ Rules:
 - memory should be conservative. Save durable preferences, people/relationships, ongoing projects, important events, promises, stable facts, or observations likely to matter later.
 - do NOT save routine small talk, temporary wording, obvious context, or facts already represented by the supplied memories.
 - memory summary must be concise and self-contained.
+- speaker identity comes only from Device/context metadata. Never guess identity from wording, topic, age, gender, or the transcript itself.
+- if context.speaker.status is "recognized", use that person's display name in durable person-specific memory summaries instead of the generic word "User".
+- if context.speaker.status is "unknown", do not create durable person-specific memories. Entity/device-global facts may still be remembered.
+- speaker similarity is a cosine-similarity signal, not certainty or a probability. If identity metadata is uncertain, behave accordingly.
 - allowed memory types: preference, person, project, event, fact, promise, observation.
 """
 
@@ -870,7 +936,10 @@ async def wake(entity_id: str, request: WakeRequest):
         for item in history:
             if item.get("user_text"):
                 messages.append(
-                    {"role": "user", "content": item["user_text"]}
+                    {
+                        "role": "user",
+                        "content": _history_user_content(item),
+                    }
                 )
             if item.get("assistant_text"):
                 messages.append(
@@ -967,7 +1036,10 @@ async def interact(entity_id: str, request: InteractionRequest):
         for item in history:
             if item.get("user_text"):
                 messages.append(
-                    {"role": "user", "content": item["user_text"]}
+                    {
+                        "role": "user",
+                        "content": _history_user_content(item),
+                    }
                 )
             if item.get("assistant_text"):
                 messages.append(
@@ -1038,6 +1110,7 @@ async def interact(entity_id: str, request: InteractionRequest):
             memory,
             request.text,
             answer,
+            request.context,
         )
 
     return InteractionResponse(
