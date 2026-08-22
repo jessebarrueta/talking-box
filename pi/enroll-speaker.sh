@@ -14,7 +14,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON="${TALKING_BOX_VENV:-$HOME/piper-venv}/bin/python"
 CAPTURE_DEVICE="${TALKING_BOX_CAPTURE_DEVICE:-plughw:CARD=sndrpigooglevoi}"
 SAMPLES="${TALKING_BOX_ENROLL_SAMPLES:-5}"
-SECONDS="${TALKING_BOX_ENROLL_SECONDS:-5}"
+SAMPLE_SECONDS="${TALKING_BOX_ENROLL_SECONDS:-5}"
 
 if [[ ! -x "$PYTHON" ]]; then
   echo "Python not found: $PYTHON" >&2
@@ -51,10 +51,10 @@ for i in $(seq 1 "$SAMPLES"); do
   files+=("$file")
 
   echo "Sample $i/$SAMPLES"
-  echo "Press Enter, then speak naturally for about $SECONDS seconds."
+  echo "Press Enter, then speak naturally for about $SAMPLE_SECONDS seconds."
   read -r
 
-  arecord     -q     -D "$CAPTURE_DEVICE"     -f S16_LE     -r 16000     -c 1     -t wav     -d "$SECONDS"     "$file"
+  arecord     -q     -D "$CAPTURE_DEVICE"     -f S16_LE     -r 16000     -c 1     -t wav     -d "$SAMPLE_SECONDS"     "$file"
 
   echo "Captured."
   echo
