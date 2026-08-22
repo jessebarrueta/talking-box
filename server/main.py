@@ -91,7 +91,7 @@ MEMORY_TYPES = {
 
 app = FastAPI(
     title="Enormous Brain Entity Service",
-    version="0.6.0",
+    version="0.7.1",
 )
 
 app.add_middleware(
@@ -268,7 +268,30 @@ def _speaker_from_context(context):
         "display_name": display_name,
     }
 
-    for key in ("similarity", "margin", "threshold"):
+    anonymous_id = str(raw.get("anonymous_id") or "").strip()
+    if anonymous_id:
+        speaker["anonymous_id"] = anonymous_id
+
+    for key in ("is_new", "session_only"):
+        if raw.get(key) is not None:
+            speaker[key] = bool(raw.get(key))
+
+    try:
+        if raw.get("seen_count") is not None:
+            speaker["seen_count"] = int(raw["seen_count"])
+    except (TypeError, ValueError):
+        pass
+
+    for key in (
+        "similarity",
+        "margin",
+        "threshold",
+        "cluster_similarity",
+        "cluster_margin",
+        "cluster_threshold",
+        "known_best_similarity",
+        "known_threshold",
+    ):
         try:
             if raw.get(key) is not None:
                 speaker[key] = round(float(raw[key]), 4)
@@ -301,7 +324,9 @@ def _history_user_content(item):
     if not speaker:
         return text
 
-    if speaker.get("status") == "recognized":
+    status = speaker.get("status")
+
+    if status == "recognized":
         label = (
             speaker.get("display_name")
             or speaker.get("id")
@@ -309,8 +334,16 @@ def _history_user_content(item):
         )
         return f"[Speaker: {label}] {text}"
 
-    if speaker.get("status") == "unknown":
-        return f"[Speaker: unknown] {text}"
+    if status == "anonymous":
+        anonymous_id = speaker.get("anonymous_id") or "anonymous"
+        return (
+            "[Speaker: unidentified "
+            f"{anonymous_id}, temporary voice cluster] "
+            f"{text}"
+        )
+
+    if status == "unknown":
+        return f"[Speaker: unidentified] {text}"
 
     return text
 
@@ -557,6 +590,7 @@ Relevant persistent memories:
 State values are private internal tendencies, not lines to recite. Let them subtly influence tone, attention, confidence, patience, and initiative. Do not announce numerical values unless explicitly asked about them.
 
 The persistent memories above are facts you may rely on. Recent conversation history is also supplied separately. If something is not present in either source, do not claim to remember it.
+Persistent memories may include speaker attribution. Never apply a memory attributed to one recognized person to a different recognized or anonymous speaker.
 
 Behavior: dry, observant, curious, faintly sardonic; pleasant without being syrupy; avoid generic assistant phrases; concise by default; no markdown or stage directions; treat the speaker as someone familiar with your construction, not a customer."""
 
@@ -596,8 +630,12 @@ Rules:
 - do NOT save routine small talk, temporary wording, obvious context, or facts already represented by the supplied memories.
 - memory summary must be concise and self-contained.
 - speaker identity comes only from Device/context metadata. Never guess identity from wording, topic, age, gender, or the transcript itself.
-- if context.speaker.status is "recognized", use that person's display name in durable person-specific memory summaries instead of the generic word "User".
-- if context.speaker.status is "unknown", do not create durable person-specific memories. Entity/device-global facts may still be remembered.
+- if context.speaker.status is "recognized", use that person's display name in durable person-specific memory summaries instead of the generic word "User". You may address them by name naturally, but do not announce recognition on every turn.
+- if context.speaker.status is "anonymous", anonymous_id is a temporary same-voice cluster that exists only for the current device process. It is evidence that this sounds like the same unidentified voice as earlier turns carrying the same anonymous_id, not a real-world identity.
+- if an anonymous speaker has is_new=true, you may naturally notice that you hear a voice you do not recognize yet. In casual conversation it is fine to ask their name, but answer urgent or direct questions first.
+- if an anonymous speaker has is_new=false, you may naturally notice that you have heard this unidentified voice earlier in the current session and refer to earlier turns carrying the same anonymous_id. If you still do not know their name from recent conversation, you may ask. Do not ask repeatedly when they already told you.
+- a name supplied by an anonymous speaker is session conversational context only. Do not claim that their voice has been durably enrolled or that you will recognize them after a restart.
+- if context.speaker.status is "anonymous" or "unknown", do not create durable person-specific memories. Entity/device-global facts may still be remembered.
 - speaker similarity is a cosine-similarity signal, not certainty or a probability. If identity metadata is uncertain, behave accordingly.
 - allowed memory types: preference, person, project, event, fact, promise, observation.
 """
@@ -756,7 +794,7 @@ async def health():
     return {
         "status": "alive",
         "service": "enormous-brain-entity-service",
-        "version": "0.6.0",
+        "version": "0.7.1",
         "memory": "persistent-v1",
         "state": "persistent-v1",
         "tts_primary": (

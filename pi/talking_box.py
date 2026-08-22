@@ -14,8 +14,10 @@ from gpiozero import Button
 
 try:
     from speaker_identity import SpeakerIdentity
+    from anonymous_speaker_session import AnonymousSpeakerSession
 except Exception as speaker_import_error:
     SpeakerIdentity = None
+    AnonymousSpeakerSession = None
 else:
     speaker_import_error = None
 
@@ -98,6 +100,7 @@ button = Button(
 
 last_spoken_text = None
 speaker_identity = None
+anonymous_speakers = None
 
 
 def utc_now():
@@ -420,12 +423,13 @@ def transcribe(path):
 
 def initialize_speaker_identity():
     global speaker_identity
+    global anonymous_speakers
 
     if not SPEAKER_ID_ENABLED:
         print("Speaker identity disabled by configuration.")
         return
 
-    if SpeakerIdentity is None:
+    if SpeakerIdentity is None or AnonymousSpeakerSession is None:
         print(
             "Speaker identity unavailable: "
             f"{type(speaker_import_error).__name__}: "
@@ -442,13 +446,19 @@ def initialize_speaker_identity():
 
     try:
         speaker_identity = SpeakerIdentity(model_path=SPEAKER_MODEL)
+        anonymous_speakers = AnonymousSpeakerSession()
         enrolled = speaker_identity.list_speakers()
         print(
             "Speaker identity ready: "
             f"{len(enrolled)} enrolled speaker(s)."
         )
+        print(
+            "Anonymous speaker discovery ready: "
+            "session-only clustering."
+        )
     except Exception as exc:
         speaker_identity = None
+        anonymous_speakers = None
         print(
             "Speaker identity initialization failed: "
             f"{type(exc).__name__}: {exc}"
@@ -464,9 +474,37 @@ def identify_speaker(path):
         }
 
     try:
-        result = speaker_identity.identify(path)
-        print("Speaker identity: " + json.dumps(result, sort_keys=True))
+        embedding = speaker_identity.embedding_from_wav(path)
+        result = speaker_identity.identify_embedding(embedding)
+
+        if (
+            result.get("status") == "unknown"
+            and anonymous_speakers is not None
+        ):
+            anonymous = anonymous_speakers.observe(embedding)
+            anonymous["known_best_similarity"] = result.get("similarity")
+            anonymous["known_threshold"] = speaker_identity.threshold
+            result = anonymous
+
+        print(
+            "Speaker identity: "
+            + json.dumps(result, sort_keys=True)
+        )
         return result
+
+    except ValueError as exc:
+        result = {
+            "status": "insufficient_audio",
+            "id": None,
+            "display_name": None,
+            "reason": str(exc),
+        }
+        print(
+            "Speaker identity: "
+            + json.dumps(result, sort_keys=True)
+        )
+        return result
+
     except Exception as exc:
         print(
             "Speaker identity failed: "
@@ -868,7 +906,7 @@ def shutdown_box():
 
 def main():
     print(
-        "Talking Box V5.2 starting."
+        "Talking Box V7.1 starting."
     )
 
     initialize_volume()
@@ -877,7 +915,7 @@ def main():
     run_wake_sequence()
 
     print(
-        "Talking Box V5.2 ready."
+        "Talking Box V7.1 ready."
     )
 
     print(
@@ -913,10 +951,6 @@ def main():
 
                 continue
 
-            speaker = identify_speaker(
-                input_path
-            )
-
             print(
                 "Transcribing..."
             )
@@ -942,6 +976,10 @@ def main():
                 transcript
             ):
                 continue
+
+            speaker = identify_speaker(
+                input_path
+            )
 
             print(
                 "Thinking..."

@@ -9,7 +9,6 @@ fi
 
 SPEAKER_ID="$1"
 DISPLAY_NAME="$2"
-
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON="${TALKING_BOX_VENV:-$HOME/piper-venv}/bin/python"
 CAPTURE_DEVICE="${TALKING_BOX_CAPTURE_DEVICE:-plughw:CARD=sndrpigooglevoi}"
@@ -50,17 +49,39 @@ for i in $(seq 1 "$SAMPLES"); do
   file="$TMP/sample-$i.wav"
   files+=("$file")
 
-  echo "Sample $i/$SAMPLES"
-  echo "Press Enter, then speak naturally for about $SAMPLE_SECONDS seconds."
-  read -r
+  while true; do
+    echo "Sample $i/$SAMPLES"
+    echo "Press Enter, then speak naturally for about $SAMPLE_SECONDS seconds."
+    read -r
 
-  arecord     -q     -D "$CAPTURE_DEVICE"     -f S16_LE     -r 16000     -c 1     -t wav     -d "$SAMPLE_SECONDS"     "$file"
+    arecord \
+      -q \
+      -D "$CAPTURE_DEVICE" \
+      -f S16_LE \
+      -r 16000 \
+      -c 1 \
+      -t wav \
+      -d "$SAMPLE_SECONDS" \
+      "$file"
 
-  echo "Captured."
-  echo
+    if "$PYTHON" "$ROOT/pi/speaker_identity.py" quality "$file"; then
+      echo "Captured."
+      echo
+      break
+    fi
+
+    echo
+    echo "That sample was too quiet or too short. Let's redo just this one."
+    echo
+  done
 done
 
-"$PYTHON" "$ROOT/pi/speaker_identity.py"   enroll   --id "$SPEAKER_ID"   --name "$DISPLAY_NAME"   --consent   "${files[@]}"
+"$PYTHON" "$ROOT/pi/speaker_identity.py" \
+  enroll \
+  --id "$SPEAKER_ID" \
+  --name "$DISPLAY_NAME" \
+  --consent \
+  "${files[@]}"
 
 echo
 echo "Current enrolled speakers:"
