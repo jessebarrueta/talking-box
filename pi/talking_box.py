@@ -6,6 +6,7 @@ import re
 import subprocess
 import tempfile
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -24,6 +25,7 @@ else:
 API_BASE = "https://api.enormousbrain.com"
 ENTITY_ID = "voice-box-001"
 DEVICE_ID = "aiy-voice-pi4-001"
+VOICE_SESSION_ID = uuid.uuid4().hex[:12]
 
 BUTTON_GPIO = 23
 ALSA_DEVICE = "talkingbox"
@@ -465,13 +467,53 @@ def initialize_speaker_identity():
         )
 
 
+def _known_speakers_context():
+    if speaker_identity is None:
+        return []
+
+    try:
+        return [
+            {
+                "id": row.get("id"),
+                "display_name": (
+                    row.get("display_name")
+                    or row.get("id")
+                ),
+            }
+            for row in speaker_identity.list_speakers()
+            if row.get("id")
+        ]
+    except Exception as exc:
+        print(
+            "Could not build known-speaker context: "
+            f"{type(exc).__name__}: {exc}"
+        )
+        return []
+
+
+def _speaker_with_session_metadata(result):
+    decorated = dict(result or {})
+    decorated["voice_session_id"] = VOICE_SESSION_ID
+
+    if decorated.get("status") == "anonymous":
+        anonymous_id = decorated.get("anonymous_id")
+        if anonymous_id:
+            decorated["anonymous_key"] = (
+                f"{VOICE_SESSION_ID}:{anonymous_id}"
+            )
+
+    return decorated
+
+
 def identify_speaker(path):
     if speaker_identity is None:
-        return {
-            "status": "unavailable",
-            "id": None,
-            "display_name": None,
-        }
+        return _speaker_with_session_metadata(
+            {
+                "status": "unavailable",
+                "id": None,
+                "display_name": None,
+            }
+        )
 
     try:
         embedding = speaker_identity.embedding_from_wav(path)
@@ -486,6 +528,8 @@ def identify_speaker(path):
             anonymous["known_threshold"] = speaker_identity.threshold
             result = anonymous
 
+        result = _speaker_with_session_metadata(result)
+
         print(
             "Speaker identity: "
             + json.dumps(result, sort_keys=True)
@@ -493,12 +537,14 @@ def identify_speaker(path):
         return result
 
     except ValueError as exc:
-        result = {
-            "status": "insufficient_audio",
-            "id": None,
-            "display_name": None,
-            "reason": str(exc),
-        }
+        result = _speaker_with_session_metadata(
+            {
+                "status": "insufficient_audio",
+                "id": None,
+                "display_name": None,
+                "reason": str(exc),
+            }
+        )
         print(
             "Speaker identity: "
             + json.dumps(result, sort_keys=True)
@@ -510,11 +556,13 @@ def identify_speaker(path):
             "Speaker identity failed: "
             f"{type(exc).__name__}: {exc}"
         )
-        return {
-            "status": "error",
-            "id": None,
-            "display_name": None,
-        }
+        return _speaker_with_session_metadata(
+            {
+                "status": "error",
+                "id": None,
+                "display_name": None,
+            }
+        )
 
 
 def device_context():
@@ -534,6 +582,8 @@ def device_context():
         ),
         "vision": False,
         "mobility": False,
+        "voice_session_id": VOICE_SESSION_ID,
+        "known_speakers": _known_speakers_context(),
     }
 
 
@@ -906,7 +956,7 @@ def shutdown_box():
 
 def main():
     print(
-        "Talking Box V7.1 starting."
+        "Talking Box V7.2 starting."
     )
 
     initialize_volume()
@@ -915,7 +965,7 @@ def main():
     run_wake_sequence()
 
     print(
-        "Talking Box V7.1 ready."
+        "Talking Box V7.2 ready."
     )
 
     print(

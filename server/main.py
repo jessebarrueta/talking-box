@@ -12,6 +12,31 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+try:
+    from .epistemics import (
+        history_user_content as epistemic_history_user_content,
+        identity_ledger,
+        known_speakers_from_context,
+        memory_scope,
+        memory_view_metadata,
+        memory_visible_to_speaker,
+        normalize_speaker_context,
+        resolve_known_speaker,
+        sender_descriptor,
+    )
+except ImportError:
+    from epistemics import (
+        history_user_content as epistemic_history_user_content,
+        identity_ledger,
+        known_speakers_from_context,
+        memory_scope,
+        memory_view_metadata,
+        memory_visible_to_speaker,
+        normalize_speaker_context,
+        resolve_known_speaker,
+        sender_descriptor,
+    )
+
 load_dotenv()
 
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
@@ -91,7 +116,7 @@ MEMORY_TYPES = {
 
 app = FastAPI(
     title="Enormous Brain Entity Service",
-    version="0.7.1",
+    version="0.7.2",
 )
 
 app.add_middleware(
@@ -116,6 +141,8 @@ class InteractionResponse(BaseModel):
     state: dict[str, Any] = Field(default_factory=dict)
     memories_used: list[dict[str, Any]] = Field(default_factory=list)
     memory_created: dict[str, Any] | None = None
+    social_message_created: dict[str, Any] | None = None
+    messages_delivered: list[int] = Field(default_factory=list)
 
 
 class WakeRequest(BaseModel):
@@ -248,57 +275,7 @@ def _settle_state_after_offline(state, seconds):
 
 
 def _speaker_from_context(context):
-    if not isinstance(context, dict):
-        return None
-
-    raw = context.get("speaker")
-    if not isinstance(raw, dict):
-        return None
-
-    status = str(raw.get("status") or "").strip().lower()
-    speaker_id = str(raw.get("id") or "").strip() or None
-    display_name = (
-        str(raw.get("display_name") or "").strip()
-        or speaker_id
-    )
-
-    speaker = {
-        "status": status or "unknown",
-        "id": speaker_id,
-        "display_name": display_name,
-    }
-
-    anonymous_id = str(raw.get("anonymous_id") or "").strip()
-    if anonymous_id:
-        speaker["anonymous_id"] = anonymous_id
-
-    for key in ("is_new", "session_only"):
-        if raw.get(key) is not None:
-            speaker[key] = bool(raw.get(key))
-
-    try:
-        if raw.get("seen_count") is not None:
-            speaker["seen_count"] = int(raw["seen_count"])
-    except (TypeError, ValueError):
-        pass
-
-    for key in (
-        "similarity",
-        "margin",
-        "threshold",
-        "cluster_similarity",
-        "cluster_margin",
-        "cluster_threshold",
-        "known_best_similarity",
-        "known_threshold",
-    ):
-        try:
-            if raw.get(key) is not None:
-                speaker[key] = round(float(raw[key]), 4)
-        except (TypeError, ValueError):
-            pass
-
-    return speaker
+    return normalize_speaker_context(context)
 
 
 def _memory_view(memory):
@@ -307,45 +284,12 @@ def _memory_view(memory):
         "summary": memory.get("summary") or "",
         "importance": float(memory.get("importance") or 0.5),
     }
-
-    metadata = memory.get("metadata")
-    if isinstance(metadata, dict):
-        speaker = metadata.get("speaker")
-        if isinstance(speaker, dict):
-            view["speaker"] = speaker
-
+    view.update(memory_view_metadata(memory))
     return view
 
 
 def _history_user_content(item):
-    text = item.get("user_text") or ""
-    speaker = _speaker_from_context(item.get("context"))
-
-    if not speaker:
-        return text
-
-    status = speaker.get("status")
-
-    if status == "recognized":
-        label = (
-            speaker.get("display_name")
-            or speaker.get("id")
-            or "recognized speaker"
-        )
-        return f"[Speaker: {label}] {text}"
-
-    if status == "anonymous":
-        anonymous_id = speaker.get("anonymous_id") or "anonymous"
-        return (
-            "[Speaker: unidentified "
-            f"{anonymous_id}, temporary voice cluster] "
-            f"{text}"
-        )
-
-    if status == "unknown":
-        return f"[Speaker: unidentified] {text}"
-
-    return text
+    return epistemic_history_user_content(item)
 
 
 def _tokens(text):
@@ -415,8 +359,20 @@ async def _recent_memories(client, entity_id, limit=40):
     return r.json()
 
 
-async def _relevant_memories(client, entity_id, query, limit=6):
+async def _relevant_memories(
+    client,
+    entity_id,
+    query,
+    limit=6,
+    speaker=None,
+):
     memories = await _recent_memories(client, entity_id, 40)
+    memories = [
+        memory
+        for memory in memories
+        if memory_visible_to_speaker(memory, speaker)
+    ]
+
     if not memories:
         return []
 
@@ -427,8 +383,6 @@ async def _relevant_memories(client, entity_id, query, limit=6):
         reverse=True,
     )
 
-    # If nothing overlaps, use a few high-importance recent memories rather
-    # than dumping an arbitrary long history into the prompt.
     if query_tokens and not any(
         query_tokens & _tokens(m.get("summary") or "")
         for m in ranked
@@ -509,21 +463,54 @@ async def _save_memory(
     except (TypeError, ValueError):
         importance = 0.5
 
-    # Exact-summary dedupe. A later semantic dedupe pass can replace this.
+    speaker = _speaker_from_context(context)
+    requested_scope = str(memory.get("scope") or "").strip().lower()
+
+    if speaker and speaker.get("status") == "recognized" and speaker.get("id"):
+        if requested_scope == "entity":
+            scope = "entity"
+            subject_speaker_id = None
+        else:
+            scope = "speaker"
+            subject_speaker_id = speaker.get("id")
+    else:
+        # Unknown/anonymous speakers cannot create durable person-specific
+        # memory. Entity facts are allowed only when the model explicitly marks
+        # them as entity scope.
+        if requested_scope != "entity":
+            return None
+        scope = "entity"
+        subject_speaker_id = None
+
     check = await client.get(
         f"{SUPABASE_URL}/rest/v1/memories",
         params={
             "entity_id": f"eq.{entity_id}",
             "summary": f"eq.{summary}",
-            "select": "id,memory_type,summary,importance,created_at",
-            "limit": "1",
+            "select": "id,memory_type,summary,importance,metadata,created_at",
+            "limit": "20",
         },
         headers=_supabase_headers(),
     )
     check.raise_for_status()
-    existing = check.json()
-    if existing:
-        return _memory_view(existing[0])
+
+    for existing in check.json():
+        existing_scope, existing_subject = memory_scope(existing)
+        if (
+            existing_scope == scope
+            and existing_subject == subject_speaker_id
+        ):
+            return _memory_view(existing)
+
+    metadata = {
+        "source_user_text": user_text[:2000],
+        "source_assistant_text": assistant_text[:2000],
+        "created_by": "interaction-reflection-v3-epistemic",
+        "speaker": speaker,
+        "scope": scope,
+    }
+    if subject_speaker_id:
+        metadata["subject_speaker_id"] = subject_speaker_id
 
     payload = {
         "entity_id": entity_id,
@@ -531,12 +518,7 @@ async def _save_memory(
         "content": summary[:1000],
         "summary": summary[:1000],
         "importance": round(importance, 3),
-        "metadata": {
-            "source_user_text": user_text[:2000],
-            "source_assistant_text": assistant_text[:2000],
-            "created_by": "interaction-reflection-v2-speaker-aware",
-            "speaker": _speaker_from_context(context),
-        },
+        "metadata": metadata,
     }
 
     r = await client.post(
@@ -552,6 +534,233 @@ async def _save_memory(
     if rows:
         return _memory_view(rows[0])
     return _memory_view(payload)
+
+
+def _mailbox_missing(response):
+    text = (getattr(response, "text", "") or "").lower()
+    return (
+        response.status_code in {400, 404}
+        and "social_messages" in text
+    )
+
+
+async def _pending_social_messages(client, entity_id, speaker, limit=5):
+    if not (
+        speaker
+        and speaker.get("status") == "recognized"
+        and speaker.get("id")
+    ):
+        return []
+
+    r = await client.get(
+        f"{SUPABASE_URL}/rest/v1/social_messages",
+        params={
+            "entity_id": f"eq.{entity_id}",
+            "recipient_speaker_id": f"eq.{speaker['id']}",
+            "status": "eq.pending",
+            "select": (
+                "id,sender_status,sender_speaker_id,sender_display_name,"
+                "sender_anonymous_key,recipient_speaker_id,"
+                "recipient_display_name,message_text,created_at"
+            ),
+            "order": "created_at.asc",
+            "limit": str(limit),
+        },
+        headers=_supabase_headers(),
+    )
+
+    if _mailbox_missing(r):
+        print(
+            "Social mailbox table is not installed; "
+            "run supabase/v7_2_social_messages.sql",
+            flush=True,
+        )
+        return []
+
+    r.raise_for_status()
+    return r.json()
+
+
+def _pending_message_prompt_view(message):
+    if (
+        message.get("sender_status") == "recognized"
+        and message.get("sender_display_name")
+    ):
+        sender = message.get("sender_display_name")
+        sender_evidence = "verified enrolled speaker"
+    else:
+        sender = "an unidentified person"
+        sender_evidence = "unverified sender identity"
+
+    return {
+        "id": message.get("id"),
+        "from": sender,
+        "sender_evidence": sender_evidence,
+        "message": message.get("message_text") or "",
+        "created_at": message.get("created_at"),
+    }
+
+
+def _validate_social_message_request(social_message, context):
+    if not isinstance(social_message, dict) or not social_message.get("create"):
+        return None, None
+
+    recipient_text = str(social_message.get("recipient") or "").strip()
+    message_text = str(social_message.get("message") or "").strip()
+
+    if not recipient_text:
+        return None, "missing_recipient"
+
+    recipient = resolve_known_speaker(recipient_text, context)
+    if recipient is None:
+        return None, "unresolved_recipient"
+
+    if not message_text:
+        return None, "missing_message"
+
+    return {
+        "recipient": recipient,
+        "message": message_text[:2000],
+    }, None
+
+
+async def _save_social_message(
+    client,
+    entity_id,
+    validated,
+    context,
+    source_user_text,
+):
+    if not validated:
+        return None
+
+    speaker = _speaker_from_context(context)
+    sender = sender_descriptor(speaker)
+    recipient = validated["recipient"]
+
+    payload = {
+        "entity_id": entity_id,
+        "sender_status": sender["status"],
+        "sender_speaker_id": sender.get("speaker_id"),
+        "sender_display_name": sender.get("display_name"),
+        "sender_voice_session_id": sender.get("voice_session_id"),
+        "sender_anonymous_id": sender.get("anonymous_id"),
+        "sender_anonymous_key": sender.get("anonymous_key"),
+        "recipient_speaker_id": recipient["id"],
+        "recipient_display_name": recipient["display_name"],
+        "message_text": validated["message"],
+        "status": "pending",
+        "metadata": {
+            "source_user_text": source_user_text[:2000],
+            "created_by": "social-mailbox-v1-grounded",
+        },
+    }
+
+    r = await client.post(
+        f"{SUPABASE_URL}/rest/v1/social_messages",
+        headers={
+            **_supabase_headers(),
+            "Prefer": "return=representation",
+        },
+        json=payload,
+    )
+
+    if _mailbox_missing(r):
+        print(
+            "Social message not saved: mailbox table is missing.",
+            flush=True,
+        )
+        return None
+
+    try:
+        r.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        print(
+            "Social message save failed: "
+            f"{type(exc).__name__}: {r.text[:500]}",
+            flush=True,
+        )
+        return None
+
+    rows = r.json()
+    if not rows:
+        return None
+
+    row = rows[0]
+    return {
+        "id": row.get("id"),
+        "recipient_speaker_id": row.get("recipient_speaker_id"),
+        "recipient_display_name": row.get("recipient_display_name"),
+        "message": row.get("message_text"),
+        "status": row.get("status"),
+    }
+
+
+async def _mark_social_messages_delivered(
+    client,
+    entity_id,
+    current_speaker,
+    pending_messages,
+    requested_ids,
+):
+    if not (
+        current_speaker
+        and current_speaker.get("status") == "recognized"
+        and current_speaker.get("id")
+    ):
+        return []
+
+    allowed = {
+        int(message["id"])
+        for message in pending_messages
+        if message.get("id") is not None
+    }
+
+    requested = []
+    for value in requested_ids or []:
+        try:
+            message_id = int(value)
+        except (TypeError, ValueError):
+            continue
+        if message_id in allowed:
+            requested.append(message_id)
+
+    requested = sorted(set(requested))
+    if not requested:
+        return []
+
+    r = await client.patch(
+        f"{SUPABASE_URL}/rest/v1/social_messages",
+        params={
+            "entity_id": f"eq.{entity_id}",
+            "recipient_speaker_id": f"eq.{current_speaker['id']}",
+            "status": "eq.pending",
+            "id": "in.(" + ",".join(str(i) for i in requested) + ")",
+        },
+        headers={
+            **_supabase_headers(),
+            "Prefer": "return=minimal",
+        },
+        json={
+            "status": "delivered",
+            "delivered_at": datetime.now(timezone.utc).isoformat(),
+        },
+    )
+
+    if _mailbox_missing(r):
+        return []
+
+    try:
+        r.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        print(
+            "Could not mark social messages delivered: "
+            f"{type(exc).__name__}: {r.text[:500]}",
+            flush=True,
+        )
+        return []
+
+    return requested
 
 
 def _system_prompt(entity, memories=None):
@@ -590,18 +799,38 @@ Relevant persistent memories:
 State values are private internal tendencies, not lines to recite. Let them subtly influence tone, attention, confidence, patience, and initiative. Do not announce numerical values unless explicitly asked about them.
 
 The persistent memories above are facts you may rely on. Recent conversation history is also supplied separately. If something is not present in either source, do not claim to remember it.
-Persistent memories may include speaker attribution. Never apply a memory attributed to one recognized person to a different recognized or anonymous speaker.
+Persistent memories may include speaker attribution and scope. The server has already filtered speaker-scoped memories so they are visible only to the verified matching speaker. Never infer or reconstruct another person's private memory from conversational clues.
 
 Behavior: dry, observant, curious, faintly sardonic; pleasant without being syrupy; avoid generic assistant phrases; concise by default; no markdown or stage directions; treat the speaker as someone familiar with your construction, not a customer."""
 
 
-def _interaction_instruction(user_text, context):
+def _interaction_instruction(
+    user_text,
+    context,
+    pending_messages=None,
+):
+    ledger = identity_ledger(context)
+    known_speakers = known_speakers_from_context(context)
+    pending_view = [
+        _pending_message_prompt_view(message)
+        for message in (pending_messages or [])
+    ]
+
     return f"""Respond to the user's message and privately reflect on how the interaction should affect your persistent state.
 
 User message:
 {user_text}
 
-Device/context metadata:
+Current identity evidence ledger (authoritative):
+{json.dumps(ledger, indent=2)}
+
+Enrolled speakers known to this physical device (names/ids only; no embeddings):
+{json.dumps(known_speakers, indent=2)}
+
+Pending social messages addressed to THIS verified speaker only:
+{json.dumps(pending_view, indent=2)}
+
+Raw device/context metadata:
 {json.dumps(context or {}, indent=2)}
 
 Return ONLY one JSON object with this exact shape:
@@ -618,26 +847,54 @@ Return ONLY one JSON object with this exact shape:
   "memory": {{
     "remember": false,
     "type": "fact",
+    "scope": "speaker",
     "summary": "",
     "importance": 0.0
-  }}
+  }},
+  "social_message": {{
+    "create": false,
+    "recipient": "",
+    "message": ""
+  }},
+  "delivered_message_ids": []
 }}
 
 Rules:
 - reply should sound natural when spoken aloud; usually 1-3 short sentences.
 - each state_delta should normally be between -0.05 and +0.05. Use 0 when nothing meaningfully changed.
+
+IDENTITY / EPISTEMIC RULES:
+- The identity evidence ledger is authoritative. Do not override it with conversational inference.
+- "recognized" means the current voice matched an enrolled local profile. Only then may you state the current speaker's real identity as verified.
+- "anonymous" means only that the voice matches the same temporary anonymous_key during this voice session. anonymous_key is not a real-world identity and expires with the device process.
+- Relationship words, symmetry, topic, writing style, age, gender, and conversational context NEVER establish speaker identity.
+- In particular: one unknown person saying "tell my husband" and another unknown person later saying "did my wife leave a message" does NOT establish that they are spouses or identify either person.
+- If an anonymous person tells you a name, you may treat it as a self-reported conversational claim, but not as verified voice identity. Do not unlock speaker-scoped memory because of a claimed name.
+- Never apply a recognized person's private memory to another recognized person or to an anonymous speaker.
+
+MEMORY RULES:
 - memory should be conservative. Save durable preferences, people/relationships, ongoing projects, important events, promises, stable facts, or observations likely to matter later.
-- do NOT save routine small talk, temporary wording, obvious context, or facts already represented by the supplied memories.
+- scope="speaker" means the memory is private to the CURRENT VERIFIED speaker. It is the default for human-specific facts/preferences when identity is recognized.
+- scope="entity" is only for durable facts about Jerry/the device/shared world that are genuinely not person-private.
+- Anonymous/unknown speakers may not create durable person-specific memories. For them, only scope="entity" can persist.
+- do NOT save routine small talk, temporary wording, obvious context, or facts already represented by supplied memories.
 - memory summary must be concise and self-contained.
-- speaker identity comes only from Device/context metadata. Never guess identity from wording, topic, age, gender, or the transcript itself.
-- if context.speaker.status is "recognized", use that person's display name in durable person-specific memory summaries instead of the generic word "User". You may address them by name naturally, but do not announce recognition on every turn.
-- if context.speaker.status is "anonymous", anonymous_id is a temporary same-voice cluster that exists only for the current device process. It is evidence that this sounds like the same unidentified voice as earlier turns carrying the same anonymous_id, not a real-world identity.
-- if an anonymous speaker has is_new=true, you may naturally notice that you hear a voice you do not recognize yet. In casual conversation it is fine to ask their name, but answer urgent or direct questions first.
-- if an anonymous speaker has is_new=false, you may naturally notice that you have heard this unidentified voice earlier in the current session and refer to earlier turns carrying the same anonymous_id. If you still do not know their name from recent conversation, you may ask. Do not ask repeatedly when they already told you.
-- a name supplied by an anonymous speaker is session conversational context only. Do not claim that their voice has been durably enrolled or that you will recognize them after a restart.
-- if context.speaker.status is "anonymous" or "unknown", do not create durable person-specific memories. Entity/device-global facts may still be remembered.
-- speaker similarity is a cosine-similarity signal, not certainty or a probability. If identity metadata is uncertain, behave accordingly.
 - allowed memory types: preference, person, project, event, fact, promise, observation.
+
+SOCIAL MESSAGE RULES:
+- A social message is a real queued message for a later verified person, not ordinary conversation history.
+- Set social_message.create=true only when the user actually asks you to pass/tell/give a message to another person.
+- recipient MUST be an exact enrolled speaker display name or id from the list above. Do not resolve "my husband", "my wife", "the kid", etc. by inference.
+- If the requested recipient is relationship-only or ambiguous, ask for the person's name and set create=false. Do NOT say you will pass it along yet.
+- If the recipient is exact and the message is clear, create it. The server will validate the recipient again before saving.
+- Sender identity comes only from the identity ledger. Never invent a sender name for an anonymous speaker.
+- Pending messages are supplied only when the current recipient is voice-verified. Do not reconstruct a private mailbox from recent conversation.
+- When you actually state a supplied pending message to the verified recipient, include its id in delivered_message_ids. Never include an id you did not explicitly deliver in the spoken reply.
+- If there are pending messages and the user asks whether anyone left a message, answer from the supplied pending list. If the list is empty, do not infer one from relationship clues in history.
+
+GROUNDING:
+- Do not promise future actions that the system cannot actually persist or execute.
+- Do not invent senses, identity evidence, message delivery, enrollment, or memory writes.
 """
 
 
@@ -647,17 +904,30 @@ def _parse_interaction_payload(raw):
         payload = json.loads(text)
         if not isinstance(payload, dict):
             raise ValueError("not an object")
+
         reply = str(payload.get("reply") or "").strip()
         if not reply:
             raise ValueError("missing reply")
+
+        delivered = payload.get("delivered_message_ids") or []
+        if not isinstance(delivered, list):
+            delivered = []
+
         return (
             reply,
             payload.get("state_delta") or {},
             payload.get("memory") or {},
+            payload.get("social_message") or {},
+            delivered,
         )
     except Exception:
-        # Avoid silencing the entity if a model/provider ignores JSON mode.
-        return text, {}, {"remember": False}
+        return (
+            text,
+            {},
+            {"remember": False},
+            {"create": False},
+            [],
+        )
 
 
 def _offline_text(seconds):
@@ -794,9 +1064,11 @@ async def health():
     return {
         "status": "alive",
         "service": "enormous-brain-entity-service",
-        "version": "0.7.1",
+        "version": "0.7.2",
         "memory": "persistent-v1",
         "state": "persistent-v1",
+        "identity_grounding": "epistemic-v1",
+        "social_mailbox": "grounded-v1",
         "tts_primary": (
             "elevenlabs-http-stream"
             if ELEVENLABS_API_KEY
@@ -1053,6 +1325,8 @@ async def interact(entity_id: str, request: InteractionRequest):
         )
         entity["current_state"] = current_state
 
+        current_speaker = _speaker_from_context(request.context)
+
         history = await _recent_interactions(
             client,
             entity_id,
@@ -1062,6 +1336,13 @@ async def interact(entity_id: str, request: InteractionRequest):
             entity_id,
             request.text,
             6,
+            speaker=current_speaker,
+        )
+        pending_messages = await _pending_social_messages(
+            client,
+            entity_id,
+            current_speaker,
+            5,
         )
 
         messages = [
@@ -1093,6 +1374,7 @@ async def interact(entity_id: str, request: InteractionRequest):
                 "content": _interaction_instruction(
                     request.text,
                     request.context,
+                    pending_messages,
                 ),
             }
         )
@@ -1103,8 +1385,8 @@ async def interact(entity_id: str, request: InteractionRequest):
             json={
                 "model": OPENROUTER_MODEL,
                 "messages": messages,
-                "temperature": 0.85,
-                "max_tokens": 300,
+                "temperature": 0.80,
+                "max_tokens": 420,
                 "response_format": {"type": "json_object"},
             },
         )
@@ -1118,11 +1400,43 @@ async def interact(entity_id: str, request: InteractionRequest):
             ) from exc
 
         raw = r.json()["choices"][0]["message"]["content"]
-        answer, state_delta, memory = _parse_interaction_payload(raw)
+        (
+            answer,
+            state_delta,
+            memory,
+            social_message_request,
+            requested_delivered_ids,
+        ) = _parse_interaction_payload(raw)
+
+        validated_social, social_error = _validate_social_message_request(
+            social_message_request,
+            request.context,
+        )
+
+        if social_error == "unresolved_recipient":
+            # Deterministic truthfulness guard: if the model tried to promise a
+            # message to a relationship descriptor, do not let the spoken reply
+            # imply that anything was queued.
+            answer = (
+                "I can pass that along, but I need their name so I know "
+                "exactly who to give it to."
+            )
+        elif social_error == "missing_recipient":
+            answer = "Who should I give that message to?"
+        elif social_error == "missing_message":
+            answer = "Sure. What would you like me to tell them?"
 
         new_state = _apply_state_delta(
             current_state,
             state_delta,
+        )
+
+        social_message_created = await _save_social_message(
+            client,
+            entity_id,
+            validated_social,
+            request.context,
+            request.text,
         )
 
         await _save_interaction(
@@ -1151,6 +1465,14 @@ async def interact(entity_id: str, request: InteractionRequest):
             request.context,
         )
 
+        messages_delivered = await _mark_social_messages_delivered(
+            client,
+            entity_id,
+            current_speaker,
+            pending_messages,
+            requested_delivered_ids,
+        )
+
     return InteractionResponse(
         entity_id=entity_id,
         text=answer,
@@ -1158,4 +1480,7 @@ async def interact(entity_id: str, request: InteractionRequest):
         state=new_state,
         memories_used=[_memory_view(m) for m in memories],
         memory_created=memory_created,
+        social_message_created=social_message_created,
+        messages_delivered=messages_delivered,
     )
+
