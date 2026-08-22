@@ -239,21 +239,27 @@ def normalize_command(text):
 
 
 def is_shutdown_request(text):
-    return normalize_command(text) in {
+    command = normalize_command(text)
+
+    # Politeness should not alter machine semantics.
+    words = command.split()
+
+    while words and words[0] == "please":
+        words.pop(0)
+
+    while words and words[-1] == "please":
+        words.pop()
+
+    command = " ".join(words)
+
+    return command in {
         "shutdown",
         "shut down",
-        "please shut down",
-        "please shutdown",
         "shut yourself down",
-        "please shut yourself down",
         "power down",
-        "please power down",
         "power yourself down",
-        "please power yourself down",
         "go to sleep",
-        "please go to sleep",
         "turn yourself off",
-        "please turn yourself off",
     }
 
 
