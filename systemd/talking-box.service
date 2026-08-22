@@ -9,6 +9,7 @@ User=jesse
 WorkingDirectory=/home/jesse/talking-box
 Environment=GPIOZERO_PIN_FACTORY=lgpio
 Environment=PYTHONUNBUFFERED=1
+ExecStartPre=/usr/bin/install -m 0644 /home/jesse/talking-box/config/asoundrc /home/jesse/.asoundrc
 ExecStart=/home/jesse/piper-venv/bin/python /home/jesse/talking-box/pi/talking_box.py
 Restart=on-failure
 RestartSec=3
