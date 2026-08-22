@@ -628,6 +628,72 @@ def _pending_message_prompt_view(message):
     }
 
 
+
+def _explicit_social_message_request(user_text, context):
+    """
+    Deterministically recognize simple, explicit message-routing requests
+    addressed to an exact enrolled speaker.
+
+    Examples:
+      "Tell Jesse to feed Cora."
+      "Ask Greyson to come downstairs."
+      "Remind Jesse that the appointment is at three."
+
+    Relationship descriptions such as "my husband" deliberately do not match.
+    """
+    text = re.sub(r"\s+", " ", str(user_text or "")).strip()
+    if not text:
+        return None
+
+    # Ignore a conversational wake/name prefix such as "Jerry,"
+    # without treating that name as identity evidence.
+    text = re.sub(
+        r"^(?:hey\s+)?[a-z0-9'-]+\s*,\s*",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    known = known_speakers_from_context(context)
+
+    for speaker in known:
+        aliases = {
+            str(speaker.get("id") or "").strip(),
+            str(speaker.get("display_name") or "").strip(),
+        }
+
+        for alias in sorted(
+            (a for a in aliases if a),
+            key=len,
+            reverse=True,
+        ):
+            pattern = (
+                r"^(?:please\s+)?"
+                r"(?P<verb>tell|ask|remind)\s+"
+                + re.escape(alias)
+                + r"\b(?P<message>.*)$"
+            )
+
+            match = re.match(
+                pattern,
+                text,
+                flags=re.IGNORECASE,
+            )
+            if not match:
+                continue
+
+            message = match.group("message").strip(" \t,.-")
+
+            return {
+                "create": True,
+                "recipient": speaker["display_name"],
+                "message": message,
+                "detected_by": "explicit-address-parser-v1",
+            }
+
+    return None
+
+
 def _validate_social_message_request(social_message, context):
     if not isinstance(social_message, dict) or not social_message.get("create"):
         return None, None
@@ -1435,6 +1501,17 @@ async def interact(entity_id: str, request: InteractionRequest):
             requested_delivered_ids,
         ) = _parse_interaction_payload(raw)
 
+        explicit_social = _explicit_social_message_request(
+            request.text,
+            request.context,
+        )
+
+        # Explicit "tell Jesse..." style routing is deterministic.
+        # The LLM may still detect less rigid conversational requests,
+        # but it cannot accidentally miss the obvious form.
+        if explicit_social:
+            social_message_request = explicit_social
+
         validated_social, social_error = _validate_social_message_request(
             social_message_request,
             request.context,
@@ -1465,6 +1542,23 @@ async def interact(entity_id: str, request: InteractionRequest):
             request.context,
             request.text,
         )
+
+        # Spoken acknowledgement must reflect what actually happened.
+        # Do not address an absent recipient as though they heard the request,
+        # and do not promise persistence if the mailbox write failed.
+        if validated_social:
+            recipient_name = validated_social["recipient"]["display_name"]
+
+            if social_message_created:
+                answer = (
+                    f"Got it. I'll give {recipient_name} that message "
+                    "when I recognize them."
+                )
+            else:
+                answer = (
+                    f"I understood the message for {recipient_name}, "
+                    "but I couldn't save it."
+                )
 
         await _save_interaction(
             client,
