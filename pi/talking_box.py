@@ -35,7 +35,7 @@ VOLUME_MIXER_DEVICE = "talkingbox"
 VOLUME_CONTROL = "TalkingBoxVolume"
 
 VOLUME_QUIET = 20
-VOLUME_DEFAULT = 55
+VOLUME_DEFAULT = 75
 VOLUME_LOUD = 75
 VOLUME_EXTREME = 100
 
@@ -54,6 +54,25 @@ SPEAKER_ID_ENABLED = os.getenv(
 ).strip().lower() not in {
     "0", "false", "no", "off",
 }
+
+PROBABLE_SPEAKER_THRESHOLD = float(
+    os.getenv("TALKING_BOX_SPEAKER_PROBABLE_THRESHOLD", "0.50")
+)
+PROBABLE_SPEAKER_MIN_MARGIN = float(
+    os.getenv("TALKING_BOX_SPEAKER_PROBABLE_MARGIN", "0.10")
+)
+PROBABLE_RECENT_VERIFIED_SECONDS = float(
+    os.getenv("TALKING_BOX_SPEAKER_PROBABLE_RECENT_SECONDS", "180")
+)
+
+RELATIONSHIPS_FILE = Path.home() / ".talking_box_relationships.json"
+
+ALSA_CONFIG_SOURCE = (
+    Path(__file__).resolve().parent.parent
+    / "config"
+    / "asoundrc"
+)
+ALSA_CONFIG_TARGET = Path.home() / ".asoundrc"
 
 SPEAKER_MODEL = (
     Path(__file__).resolve().parent.parent
@@ -103,6 +122,7 @@ button = Button(
 last_spoken_text = None
 speaker_identity = None
 anonymous_speakers = None
+last_verified_speaker = None
 
 
 def utc_now():
@@ -263,7 +283,43 @@ def is_shutdown_request(text):
     }
 
 
+def ensure_alsa_config(force=False):
+    try:
+        if not ALSA_CONFIG_SOURCE.is_file():
+            print(
+                "Canonical ALSA config is missing: "
+                f"{ALSA_CONFIG_SOURCE}"
+            )
+            return False
+
+        desired = ALSA_CONFIG_SOURCE.read_bytes()
+        current = None
+
+        if ALSA_CONFIG_TARGET.exists():
+            try:
+                current = ALSA_CONFIG_TARGET.read_bytes()
+            except OSError:
+                current = None
+
+        if force or current != desired:
+            tmp = ALSA_CONFIG_TARGET.with_name(".asoundrc.tmp")
+            tmp.write_bytes(desired)
+            os.chmod(tmp, 0o644)
+            tmp.replace(ALSA_CONFIG_TARGET)
+            print("Restored ALSA config from tracked canonical copy.")
+
+        return True
+
+    except Exception as exc:
+        print(
+            "Could not restore ALSA config: "
+            f"{type(exc).__name__}: {exc}"
+        )
+        return False
+
+
 def run_amixer(*args, capture=False):
+    ensure_alsa_config()
     return subprocess.run(
         ["amixer", "-D", VOLUME_MIXER_DEVICE, *args],
         check=True,
@@ -512,6 +568,8 @@ def _speaker_with_session_metadata(result):
 
 
 def identify_speaker(path):
+    global last_verified_speaker
+
     if speaker_identity is None:
         return _speaker_with_session_metadata(
             {
@@ -526,13 +584,86 @@ def identify_speaker(path):
         result = speaker_identity.identify_embedding(embedding)
 
         if (
-            result.get("status") == "unknown"
-            and anonymous_speakers is not None
+            result.get("status") == "recognized"
+            and result.get("id")
         ):
-            anonymous = anonymous_speakers.observe(embedding)
-            anonymous["known_best_similarity"] = result.get("similarity")
-            anonymous["known_threshold"] = speaker_identity.threshold
-            result = anonymous
+            last_verified_speaker = {
+                "id": result.get("id"),
+                "display_name": (
+                    result.get("display_name")
+                    or result.get("id")
+                ),
+                "at": time.monotonic(),
+            }
+
+        elif result.get("status") == "unknown":
+            candidate_id = result.get("candidate_id")
+            candidate_name = (
+                result.get("candidate_display_name")
+                or candidate_id
+            )
+            similarity = float(result.get("similarity") or 0.0)
+            margin = result.get("margin")
+            margin_ok = (
+                margin is None
+                or float(margin) >= PROBABLE_SPEAKER_MIN_MARGIN
+            )
+
+            recent_match = False
+            recent_age = None
+            if (
+                last_verified_speaker
+                and candidate_id
+                and last_verified_speaker.get("id") == candidate_id
+            ):
+                recent_age = max(
+                    0.0,
+                    time.monotonic()
+                    - float(last_verified_speaker.get("at") or 0.0),
+                )
+                recent_match = (
+                    recent_age <= PROBABLE_RECENT_VERIFIED_SECONDS
+                )
+
+            if (
+                candidate_id
+                and similarity >= PROBABLE_SPEAKER_THRESHOLD
+                and margin_ok
+            ):
+                result = {
+                    "status": "probable",
+                    "id": None,
+                    "display_name": None,
+                    "candidate_id": candidate_id,
+                    "candidate_display_name": candidate_name,
+                    "similarity": similarity,
+                    "best_sample_similarity": result.get(
+                        "best_sample_similarity"
+                    ),
+                    "margin": margin,
+                    "threshold": speaker_identity.threshold,
+                    "identity_verified": False,
+                    "needs_confirmation": True,
+                    "probable_basis": (
+                        "recent_verified_same_candidate"
+                        if recent_match
+                        else "weak_enrolled_voice_match"
+                    ),
+                    "recent_verified_age_seconds": recent_age,
+                }
+
+            elif anonymous_speakers is not None:
+                anonymous = anonymous_speakers.observe(embedding)
+                anonymous["known_best_similarity"] = result.get(
+                    "similarity"
+                )
+                anonymous["known_threshold"] = speaker_identity.threshold
+                anonymous["known_candidate_id"] = candidate_id
+                anonymous["known_candidate_display_name"] = candidate_name
+                anonymous["known_best_sample_similarity"] = result.get(
+                    "best_sample_similarity"
+                )
+                result = anonymous
 
         result = _speaker_with_session_metadata(result)
 
@@ -571,6 +702,48 @@ def identify_speaker(path):
         )
 
 
+def _relationship_context():
+    try:
+        if not RELATIONSHIPS_FILE.exists():
+            return []
+
+        payload = json.loads(RELATIONSHIPS_FILE.read_text())
+        raw = (
+            payload.get("relationships")
+            if isinstance(payload, dict)
+            else payload
+        )
+        if not isinstance(raw, list):
+            return []
+
+        result = []
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+
+            source = str(item.get("from") or "").strip()
+            target = str(item.get("to") or "").strip()
+            relation = str(item.get("type") or "").strip().lower()
+
+            if source and target and relation:
+                result.append(
+                    {
+                        "from": source,
+                        "to": target,
+                        "type": relation,
+                    }
+                )
+
+        return result
+
+    except Exception as exc:
+        print(
+            "Could not read relationship context: "
+            f"{type(exc).__name__}: {exc}"
+        )
+        return []
+
+
 def device_context():
     return {
         "embodiment": (
@@ -590,6 +763,7 @@ def device_context():
         "mobility": False,
         "voice_session_id": VOICE_SESSION_ID,
         "known_speakers": _known_speakers_context(),
+        "relationships": _relationship_context(),
     }
 
 
@@ -636,6 +810,8 @@ def wake_greeting(info):
 
 
 def cloud_speak(text):
+    ensure_alsa_config()
+
     with requests.post(
         f"{API_BASE}/v1/speech",
         json={
@@ -741,6 +917,8 @@ def cloud_speak(text):
 
 
 def piper_speak(text):
+    ensure_alsa_config()
+
     with tempfile.NamedTemporaryFile(
         suffix=".wav",
         delete=False,
@@ -962,7 +1140,7 @@ def shutdown_box():
 
 def main():
     print(
-        "Talking Box V7.2 starting."
+        "Talking Box V7.3 starting."
     )
 
     initialize_volume()
@@ -971,7 +1149,7 @@ def main():
     run_wake_sequence()
 
     print(
-        "Talking Box V7.2 ready."
+        "Talking Box V7.3 ready."
     )
 
     print(

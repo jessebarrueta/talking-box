@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 try:
     from .epistemics import (
         history_user_content as epistemic_history_user_content,
+        history_visible_to_speaker,
         identity_ledger,
         known_speakers_from_context,
         memory_scope,
@@ -27,6 +28,7 @@ try:
 except ImportError:
     from epistemics import (
         history_user_content as epistemic_history_user_content,
+        history_visible_to_speaker,
         identity_ledger,
         known_speakers_from_context,
         memory_scope,
@@ -116,7 +118,7 @@ MEMORY_TYPES = {
 
 app = FastAPI(
     title="Enormous Brain Entity Service",
-    version="0.7.2",
+    version="0.7.3",
 )
 
 app.add_middleware(
@@ -365,12 +367,13 @@ async def _relevant_memories(
     query,
     limit=6,
     speaker=None,
+    access_context=None,
 ):
     memories = await _recent_memories(client, entity_id, 40)
     memories = [
         memory
         for memory in memories
-        if memory_visible_to_speaker(memory, speaker)
+        if memory_visible_to_speaker(memory, speaker, access_context)
     ]
 
     if not memories:
@@ -465,14 +468,31 @@ async def _save_memory(
 
     speaker = _speaker_from_context(context)
     requested_scope = str(memory.get("scope") or "").strip().lower()
+    requested_visibility = str(
+        memory.get("visibility") or ""
+    ).strip().lower()
+    allowed_visibilities = {
+        "public",
+        "subject",
+        "private",
+        "household",
+        "guardian",
+        "participants",
+    }
 
     if speaker and speaker.get("status") == "recognized" and speaker.get("id"):
         if requested_scope == "entity":
             scope = "entity"
             subject_speaker_id = None
+            visibility = "public"
         else:
             scope = "speaker"
             subject_speaker_id = speaker.get("id")
+            visibility = (
+                requested_visibility
+                if requested_visibility in allowed_visibilities
+                else "subject"
+            )
     else:
         # Unknown/anonymous speakers cannot create durable person-specific
         # memory. Entity facts are allowed only when the model explicitly marks
@@ -481,6 +501,7 @@ async def _save_memory(
             return None
         scope = "entity"
         subject_speaker_id = None
+        visibility = "public"
 
     check = await client.get(
         f"{SUPABASE_URL}/rest/v1/memories",
@@ -508,6 +529,7 @@ async def _save_memory(
         "created_by": "interaction-reflection-v3-epistemic",
         "speaker": speaker,
         "scope": scope,
+        "visibility": visibility,
     }
     if subject_speaker_id:
         metadata["subject_speaker_id"] = subject_speaker_id
@@ -920,6 +942,9 @@ Current identity evidence ledger (authoritative):
 Enrolled speakers known to this physical device (names/ids only; no embeddings):
 {json.dumps(known_speakers, indent=2)}
 
+Relationship declarations supplied by the physical device:
+{json.dumps((context or {}).get("relationships") or [], indent=2)}
+
 Pending social messages addressed to THIS verified speaker only:
 {json.dumps(pending_view, indent=2)}
 
@@ -941,6 +966,7 @@ Return ONLY one JSON object with this exact shape:
     "remember": false,
     "type": "fact",
     "scope": "speaker",
+    "visibility": "subject",
     "summary": "",
     "importance": 0.0
   }},
@@ -959,6 +985,8 @@ Rules:
 IDENTITY / EPISTEMIC RULES:
 - The identity evidence ledger is authoritative. Do not override it with conversational inference.
 - "recognized" means the current voice matched an enrolled local profile. Only then may you state the current speaker's real identity as verified.
+- "probable" is a tentative enrolled-speaker hypothesis. It is NOT verification. You may naturally confirm it conversationally, e.g. "I think that's Jesse—is that you?" but a yes/no answer remains a conversational claim and does not become biometric verification.
+- A probable identity may improve conversational continuity, but it must NOT unlock speaker-private memories, guardian-only information, or pending social messages.
 - "anonymous" means only that the voice matches the same temporary anonymous_key during this voice session. anonymous_key is not a real-world identity and expires with the device process.
 - Relationship words, symmetry, topic, writing style, age, gender, and conversational context NEVER establish speaker identity.
 - In particular: one unknown person saying "tell my husband" and another unknown person later saying "did my wife leave a message" does NOT establish that they are spouses or identify either person.
@@ -967,8 +995,14 @@ IDENTITY / EPISTEMIC RULES:
 
 MEMORY RULES:
 - memory should be conservative. Save durable preferences, people/relationships, ongoing projects, important events, promises, stable facts, or observations likely to matter later.
-- scope="speaker" means the memory is private to the CURRENT VERIFIED speaker. It is the default for human-specific facts/preferences when identity is recognized.
-- scope="entity" is only for durable facts about Jerry/the device/shared world that are genuinely not person-private.
+- scope="speaker" means the memory has a human subject. The server uses visibility to decide who may later receive it.
+- visibility="subject" or "private": verified subject only.
+- visibility="household": verified subject plus verified family/household relationships such as parent/child/sibling/spouse/partner/household/guardian.
+- visibility="guardian": verified subject plus an explicitly declared guardian. Do not silently treat "parent" as "guardian".
+- visibility="participants": only explicitly listed participants when metadata supports them.
+- visibility="public": safe for any speaker.
+- If unsure, use visibility="subject". Prefer narrower disclosure over guessing.
+- scope="entity" is only for durable facts about Jerry/the device/shared world that are genuinely not person-private and is stored as public.
 - Anonymous/unknown speakers may not create durable person-specific memories. For them, only scope="entity" can persist.
 - do NOT save routine small talk, temporary wording, obvious context, or facts already represented by supplied memories.
 - memory summary must be concise and self-contained.
@@ -1157,7 +1191,7 @@ async def health():
     return {
         "status": "alive",
         "service": "enormous-brain-entity-service",
-        "version": "0.7.2",
+        "version": "0.7.3",
         "memory": "persistent-v1",
         "state": "persistent-v1",
         "identity_grounding": "epistemic-v1",
@@ -1322,11 +1356,18 @@ async def wake(entity_id: str, request: WakeRequest):
             entity_id,
             6,
         )
+        history = [
+            item
+            for item in history
+            if history_visible_to_speaker(item, None)
+        ]
         memories = await _relevant_memories(
             client,
             entity_id,
             "",
             5,
+            speaker=None,
+            access_context=request.context,
         )
 
         messages = [
@@ -1424,12 +1465,18 @@ async def interact(entity_id: str, request: InteractionRequest):
             client,
             entity_id,
         )
+        history = [
+            item
+            for item in history
+            if history_visible_to_speaker(item, current_speaker)
+        ]
         memories = await _relevant_memories(
             client,
             entity_id,
             request.text,
             6,
             speaker=current_speaker,
+            access_context=request.context,
         )
         pending_messages = await _pending_social_messages(
             client,

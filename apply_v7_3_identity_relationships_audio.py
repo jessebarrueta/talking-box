@@ -1048,22 +1048,22 @@ main = replace_once(
 
 main = replace_once(
     main,
-    '''  "memory": {
+    '''  "memory": {{
     "remember": false,
     "type": "fact",
     "scope": "speaker",
     "summary": "",
     "importance": 0.0
-  },
+  }},
 ''',
-    '''  "memory": {
+    '''  "memory": {{
     "remember": false,
     "type": "fact",
     "scope": "speaker",
     "visibility": "subject",
     "summary": "",
     "importance": 0.0
-  },
+  }},
 ''',
     "interaction JSON memory visibility",
 )

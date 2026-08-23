@@ -224,16 +224,54 @@ class SpeakerIdentity:
         recognized = best_score >= self.threshold
         if recognized and separation is not None and separation < self.margin:
             recognized = False
+        sample_scores = []
+        for value in best_profile.get("embeddings") or []:
+            vector = np.asarray(value, dtype=np.float32)
+            if vector.size == self.embedding_dim:
+                sample_scores.append(
+                    float(np.dot(query, _normalize(vector)))
+                )
+        best_sample_score = max(sample_scores) if sample_scores else None
+
         if not recognized:
-            return {"status": "unknown", "id": None, "display_name": None,
-                    "similarity": round(best_score, 4),
-                    "margin": round(separation, 4) if separation is not None else None,
-                    "threshold": self.threshold}
-        return {"status": "recognized", "id": best_id,
-                "display_name": best_profile.get("display_name") or best_id,
+            return {
+                "status": "unknown",
+                "id": None,
+                "display_name": None,
+                "candidate_id": best_id,
+                "candidate_display_name": (
+                    best_profile.get("display_name") or best_id
+                ),
                 "similarity": round(best_score, 4),
-                "margin": round(separation, 4) if separation is not None else None,
-                "threshold": self.threshold}
+                "best_sample_similarity": (
+                    round(best_sample_score, 4)
+                    if best_sample_score is not None
+                    else None
+                ),
+                "margin": (
+                    round(separation, 4)
+                    if separation is not None
+                    else None
+                ),
+                "threshold": self.threshold,
+            }
+        return {
+            "status": "recognized",
+            "id": best_id,
+            "display_name": best_profile.get("display_name") or best_id,
+            "similarity": round(best_score, 4),
+            "best_sample_similarity": (
+                round(best_sample_score, 4)
+                if best_sample_score is not None
+                else None
+            ),
+            "margin": (
+                round(separation, 4)
+                if separation is not None
+                else None
+            ),
+            "threshold": self.threshold,
+        }
 
     def identify(self, wav_path):
         try:
