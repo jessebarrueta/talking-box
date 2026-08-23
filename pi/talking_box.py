@@ -34,8 +34,15 @@ CAPTURE_DEVICE = "plughw:CARD=sndrpigooglevoi"
 VOLUME_MIXER_DEVICE = "talkingbox"
 VOLUME_CONTROL = "TalkingBoxVolume"
 
+ALSA_CONFIG_SOURCE = (
+    Path(__file__).resolve().parent.parent
+    / "config"
+    / "asoundrc"
+)
+ALSA_CONFIG_TARGET = Path.home() / ".asoundrc"
+
 VOLUME_QUIET = 20
-VOLUME_DEFAULT = 55
+VOLUME_DEFAULT = 75
 VOLUME_LOUD = 75
 VOLUME_EXTREME = 100
 
@@ -263,7 +270,43 @@ def is_shutdown_request(text):
     }
 
 
+def ensure_alsa_config(force=False):
+    try:
+        if not ALSA_CONFIG_SOURCE.is_file():
+            print(
+                "Canonical ALSA config is missing: "
+                f"{ALSA_CONFIG_SOURCE}"
+            )
+            return False
+
+        desired = ALSA_CONFIG_SOURCE.read_bytes()
+        current = None
+
+        if ALSA_CONFIG_TARGET.exists():
+            try:
+                current = ALSA_CONFIG_TARGET.read_bytes()
+            except OSError:
+                current = None
+
+        if force or current != desired:
+            tmp = ALSA_CONFIG_TARGET.with_name(".asoundrc.tmp")
+            tmp.write_bytes(desired)
+            tmp.chmod(0o644)
+            tmp.replace(ALSA_CONFIG_TARGET)
+            print("Restored ALSA config from tracked canonical copy.")
+
+        return True
+
+    except Exception as exc:
+        print(
+            "Could not restore ALSA config: "
+            f"{type(exc).__name__}: {exc}"
+        )
+        return False
+
+
 def run_amixer(*args, capture=False):
+    ensure_alsa_config()
     return subprocess.run(
         ["amixer", "-D", VOLUME_MIXER_DEVICE, *args],
         check=True,
@@ -636,6 +679,8 @@ def wake_greeting(info):
 
 
 def cloud_speak(text):
+    ensure_alsa_config()
+
     with requests.post(
         f"{API_BASE}/v1/speech",
         json={
@@ -741,6 +786,8 @@ def cloud_speak(text):
 
 
 def piper_speak(text):
+    ensure_alsa_config()
+
     with tempfile.NamedTemporaryFile(
         suffix=".wav",
         delete=False,
