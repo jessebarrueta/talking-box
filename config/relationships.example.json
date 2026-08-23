@@ -1,0 +1,9 @@
+{
+  "relationships": [
+    {
+      "from": "person-a",
+      "to": "person-b",
+      "type": "parent"
+    }
+  ]
+}
