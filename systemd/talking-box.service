@@ -13,6 +13,7 @@ ExecStartPre=/usr/bin/install -m 0644 /home/jesse/talking-box/config/asoundrc /h
 ExecStart=/home/jesse/piper-venv/bin/python /home/jesse/talking-box/pi/talking_box.py
 Restart=on-failure
 RestartSec=3
+EnvironmentFile=/etc/talking-box.env
 
 [Install]
 WantedBy=multi-user.target
