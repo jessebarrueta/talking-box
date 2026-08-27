@@ -67,6 +67,13 @@ Expected shape:
 
 `similarity` is cosine similarity, not a calibrated probability.
 
+Before local embedding extraction, the Pi removes DC offset and applies bounded,
+peak-safe RMS gain. This reduces capture-level variation when the same person
+speaks at different distances. It does not change the verified similarity or
+margin thresholds. The `quality` command also reports peak, clipping fraction,
+and an estimated SNR as audio diagnostics; none of those values is identity
+confidence, and no recording or embedding is sent to the server for this step.
+
 ## Runtime behavior
 
 `talking_box.py` attempts local speaker recognition for each usable push-to-talk recording.
@@ -88,6 +95,19 @@ TALKING_BOX_SPEAKER_MIN_SECONDS=0.8
 ```
 
 These are starting values, not final truth. Tune them using the actual Voice HAT mic across different distances, background noise, moods, and household speakers.
+
+### On-device distance validation
+
+Do not adjust thresholds until the actual microphone has been measured. With
+the service stopped and each participant's consent, record at least five
+different phrases per participant at 0.5 m, 1 m, 2 m, and the farthest normal
+room position. Repeat one set with typical background noise. Include at least
+one non-enrolled participant. Run `quality` and `identify` on every recording,
+then compare per-person genuine similarity, nearest-impostor similarity,
+margin, clipping fraction, and estimated SNR by distance. A threshold change is
+justified only if the measured genuine/impostor separation supports it. Delete
+the calibration WAVs after recording the anonymized score table; local enrolled
+embeddings remain in `~/.talking_box_speakers.json`.
 
 ## Next slice
 

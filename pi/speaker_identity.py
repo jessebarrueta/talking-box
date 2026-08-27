@@ -20,6 +20,9 @@ DEFAULT_MARGIN = float(os.getenv("TALKING_BOX_SPEAKER_MARGIN", "0.08"))
 MIN_AUDIO_SECONDS = float(os.getenv("TALKING_BOX_SPEAKER_MIN_SECONDS", "0.8"))
 MIN_RMS = float(os.getenv("TALKING_BOX_SPEAKER_MIN_RMS", "0.002"))
 MAX_EMBEDDINGS_PER_SPEAKER = int(os.getenv("TALKING_BOX_SPEAKER_MAX_EMBEDDINGS", "20"))
+TARGET_AUDIO_RMS = float(os.getenv("TALKING_BOX_SPEAKER_TARGET_RMS", "0.05"))
+MAX_AUDIO_GAIN = float(os.getenv("TALKING_BOX_SPEAKER_MAX_GAIN", "12.0"))
+NORMALIZED_PEAK_LIMIT = 0.95
 
 
 def utc_now() -> str:
@@ -63,6 +66,55 @@ def _read_wav(path: str | Path) -> tuple[np.ndarray, int, float]:
     return samples, sample_rate, duration
 
 
+def normalize_audio_level(samples: np.ndarray) -> tuple[np.ndarray, dict[str, float]]:
+    """Apply bounded, peak-safe gain without changing identity thresholds.
+
+    Speaker embedding models are sensitive to capture level even though their
+    output embeddings are unit-normalized. This makes the waveform level more
+    consistent across microphone distances while avoiding nonlinear limiting.
+    """
+    samples = np.asarray(samples, dtype=np.float32)
+    if not samples.size:
+        return np.ascontiguousarray(samples), {"gain": 1.0, "output_rms": 0.0}
+
+    centered = samples - float(np.mean(samples))
+    rms = float(np.sqrt(np.mean(np.square(centered))))
+    peak = float(np.max(np.abs(centered)))
+    if not math.isfinite(rms) or rms <= 1e-8:
+        return np.ascontiguousarray(centered), {"gain": 1.0, "output_rms": rms}
+
+    desired_gain = TARGET_AUDIO_RMS / rms
+    peak_safe_gain = NORMALIZED_PEAK_LIMIT / peak if peak > 0 else MAX_AUDIO_GAIN
+    gain = max(0.0, min(desired_gain, MAX_AUDIO_GAIN, peak_safe_gain))
+    normalized = np.ascontiguousarray(centered * gain, dtype=np.float32)
+    output_rms = float(np.sqrt(np.mean(np.square(normalized))))
+    return normalized, {"gain": round(gain, 4), "output_rms": round(output_rms, 6)}
+
+
+def _audio_diagnostics(samples: np.ndarray, sample_rate: int) -> dict[str, Any]:
+    if not len(samples):
+        return {"peak": 0.0, "clipping_fraction": 0.0, "estimated_snr_db": None}
+    peak = float(np.max(np.abs(samples)))
+    clipping_fraction = float(np.mean(np.abs(samples) >= (32767.0 / 32768.0)))
+
+    frame_size = max(1, int(sample_rate * 0.02))
+    usable = len(samples) - (len(samples) % frame_size)
+    snr = None
+    if usable >= frame_size * 2:
+        frames = samples[:usable].reshape(-1, frame_size)
+        frame_rms = np.sqrt(np.mean(np.square(frames), axis=1))
+        noise = float(np.percentile(frame_rms, 20))
+        signal = float(np.percentile(frame_rms, 90))
+        if noise > 1e-8 and signal > noise:
+            snr = 20.0 * math.log10(signal / noise)
+    return {
+        "peak": round(peak, 6),
+        "clipping_fraction": round(clipping_fraction, 6),
+        # Diagnostic only: percentile-based estimate, not an identity score.
+        "estimated_snr_db": round(snr, 2) if snr is not None else None,
+    }
+
+
 def wav_quality(path: str | Path) -> dict[str, Any]:
     samples, sample_rate, duration = _read_wav(path)
     rms = float(np.sqrt(np.mean(np.square(samples)))) if len(samples) else 0.0
@@ -77,6 +129,7 @@ def wav_quality(path: str | Path) -> dict[str, Any]:
         "sample_rate": int(sample_rate),
         "rms": round(rms, 6),
         "minimum_rms": MIN_RMS,
+        **_audio_diagnostics(samples, sample_rate),
         "reason": "; ".join(reasons) if reasons else None,
     }
 
@@ -139,6 +192,7 @@ class SpeakerIdentity:
         if not quality["valid"]:
             raise ValueError(quality["reason"] or "Recording is not usable")
         samples, sample_rate, _ = _read_wav(path)
+        samples, _normalization = normalize_audio_level(samples)
         stream = self.extractor.create_stream()
         stream.accept_waveform(sample_rate=sample_rate, waveform=samples)
         stream.input_finished()
