@@ -1,4 +1,5 @@
 import base64
+import hmac
 import json
 import os
 import re
@@ -9,7 +10,7 @@ import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 try:
@@ -79,6 +80,13 @@ SUPABASE_SERVICE_ROLE_KEY = os.getenv(
     "",
 )
 
+# Shared only by this API and its trusted device clients. Keep the value in
+# each runtime's environment; never commit it to the repository.
+TALKING_BOX_DEVICE_TOKEN = os.getenv(
+    "TALKING_BOX_DEVICE_TOKEN",
+    "",
+).strip()
+
 ALLOWED_ORIGINS = [
     o.strip()
     for o in os.getenv(
@@ -130,6 +138,39 @@ app.add_middleware(
 )
 
 
+@app.middleware("http")
+async def require_device_auth(request, call_next):
+    """Require the shared device credential for every versioned API route."""
+    is_v1 = request.url.path == "/v1" or request.url.path.startswith("/v1/")
+    if not is_v1 or request.method == "OPTIONS":
+        return await call_next(request)
+
+    if not TALKING_BOX_DEVICE_TOKEN:
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "Device authentication is not configured"},
+        )
+
+    authorization = request.headers.get("Authorization", "")
+    scheme, separator, bearer_token = authorization.partition(" ")
+    candidates = [request.headers.get("X-API-Key", "")]
+    if separator and scheme.lower() == "bearer":
+        candidates.append(bearer_token.strip())
+
+    if not any(
+        candidate
+        and hmac.compare_digest(candidate, TALKING_BOX_DEVICE_TOKEN)
+        for candidate in candidates
+    ):
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "Invalid or missing device credential"},
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    return await call_next(request)
+
+
 class InteractionRequest(BaseModel):
     text: str = Field(min_length=1, max_length=8000)
     device_id: str | None = None
@@ -165,7 +206,9 @@ class WakeResponse(BaseModel):
 
 
 class TranscriptionRequest(BaseModel):
-    audio_base64: str = Field(min_length=1)
+    # A 45-second 16 kHz mono WAV is about 2 MB after base64 encoding. Leave
+    # headroom while rejecting unexpectedly large, costly request bodies.
+    audio_base64: str = Field(min_length=1, max_length=3_000_000)
     format: str = "wav"
     language: str | None = "en"
 
@@ -1022,6 +1065,7 @@ SOCIAL MESSAGE RULES:
 GROUNDING:
 - Do not promise future actions that the system cannot actually persist or execute.
 - Do not invent senses, identity evidence, message delivery, enrollment, or memory writes.
+- Raw context field last_sleep is authoritative for the most recent completed power-off interval. If its status is "known", use duration_seconds when asked how long you were asleep. If it is absent or unavailable, say you do not know; never estimate it. Do not expose shutdown or boot timestamps.
 """
 
 
@@ -1651,4 +1695,3 @@ async def interact(entity_id: str, request: InteractionRequest):
         social_message_created=social_message_created,
         messages_delivered=messages_delivered,
     )
-

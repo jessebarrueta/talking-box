@@ -13,6 +13,8 @@ from pathlib import Path
 import requests
 from gpiozero import Button
 
+from lifecycle import calculate_sleep_duration, sleep_context_from_state
+
 try:
     from speaker_identity import SpeakerIdentity
     from anonymous_speaker_session import AnonymousSpeakerSession
@@ -26,6 +28,10 @@ API_BASE = "https://api.enormousbrain.com"
 ENTITY_ID = "voice-box-001"
 DEVICE_ID = "aiy-voice-pi4-001"
 VOICE_SESSION_ID = uuid.uuid4().hex[:12]
+TALKING_BOX_DEVICE_TOKEN = os.getenv(
+    "TALKING_BOX_DEVICE_TOKEN",
+    "",
+).strip()
 
 BUTTON_GPIO = 23
 ALSA_DEVICE = "talkingbox"
@@ -125,26 +131,23 @@ anonymous_speakers = None
 last_verified_speaker = None
 
 
+def api_auth_headers():
+    if not TALKING_BOX_DEVICE_TOKEN:
+        raise RuntimeError(
+            "TALKING_BOX_DEVICE_TOKEN is not configured"
+        )
+
+    return {
+        "Authorization": (
+            f"Bearer {TALKING_BOX_DEVICE_TOKEN}"
+        )
+    }
+
+
 def utc_now():
     return datetime.now(
         timezone.utc
     ).isoformat()
-
-
-def parse_dt(value):
-    try:
-        if not value:
-            return None
-
-        return datetime.fromisoformat(
-            value.replace(
-                "Z",
-                "+00:00",
-            )
-        )
-
-    except ValueError:
-        return None
 
 
 def load_state():
@@ -201,24 +204,18 @@ def begin_boot_session():
 
     offline = None
 
-    a = parse_dt(
-        last_shutdown_at
+    offline = calculate_sleep_duration(
+        last_shutdown_at,
+        booted_at,
     )
-
-    b = parse_dt(
-        booted_at
-    )
-
-    if a and b:
-        offline = max(
-            0.0,
-            (b - a).total_seconds(),
-        )
 
     state.update(
         {
             "boot_count": boot_count,
             "last_boot_at": booted_at,
+            # Store None explicitly when the interval is unknowable so stale
+            # duration data is never presented as fact.
+            "last_sleep_seconds": offline,
         }
     )
 
@@ -472,6 +469,7 @@ def transcribe(path):
 
     r = requests.post(
         f"{API_BASE}/v1/transcribe",
+        headers=api_auth_headers(),
         json={
             "audio_base64": data,
             "format": "wav",
@@ -745,6 +743,8 @@ def _relationship_context():
 
 
 def device_context():
+    state = load_state()
+
     return {
         "embodiment": (
             "Google AIY Voice Kit "
@@ -762,6 +762,7 @@ def device_context():
         "vision": False,
         "mobility": False,
         "voice_session_id": VOICE_SESSION_ID,
+        "last_sleep": sleep_context_from_state(state),
         "known_speakers": _known_speakers_context(),
         "relationships": _relationship_context(),
     }
@@ -777,6 +778,7 @@ def interact(text, speaker=None):
             f"{API_BASE}/v1/entities/"
             f"{ENTITY_ID}/interact"
         ),
+        headers=api_auth_headers(),
         json={
             "text": text,
             "device_id": DEVICE_ID,
@@ -796,6 +798,7 @@ def wake_greeting(info):
             f"{API_BASE}/v1/entities/"
             f"{ENTITY_ID}/wake"
         ),
+        headers=api_auth_headers(),
         json={
             "device_id": DEVICE_ID,
             **info,
@@ -814,6 +817,7 @@ def cloud_speak(text):
 
     with requests.post(
         f"{API_BASE}/v1/speech",
+        headers=api_auth_headers(),
         json={
             "text": text,
         },

@@ -55,6 +55,32 @@ The HTTP Text-to-Dialogue API defaults to `eleven_v3`. If your ElevenLabs worksp
 
 ## Server deployment
 
+Configure the same high-entropy device secret in the server and Pi runtime
+environments (for example, their existing untracked environment files):
+
+```text
+TALKING_BOX_DEVICE_TOKEN=<random secret>
+```
+
+`/health` remains public. Every `/v1` request requires either
+`Authorization: Bearer <secret>` or `X-API-Key: <secret>`. The API fails closed
+with `503` if the server secret is missing; the Pi also refuses to make a
+versioned API request if its secret is missing. Do not put the secret in this
+repository.
+
+The transcription schema caps base64 audio at 3 MB. At the public reverse
+proxy, also set a request-body limit near 3 MB and rate-limit `/v1` by source
+and/or credential, with tighter limits on transcription, speech, wake, and
+interaction routes. Proxy-level controls avoid adding application dependencies
+and reject abuse before costly request processing.
+
+At boot, the Pi measures its most recent completed sleep interval from its
+existing locally persisted graceful-shutdown timestamp and current boot time.
+Only the measured duration is added to interaction context; the underlying
+timestamps remain local. If shutdown time is missing or invalid (for example,
+after an abrupt power loss), the context explicitly reports the duration as
+unavailable rather than estimating it.
+
 Replace:
 
 ```text
@@ -92,6 +118,7 @@ Expected:
 ```bash
 curl -sS -N -D /tmp/talking-box-headers.txt \
   -X POST https://api.enormousbrain.com/v1/speech \
+  -H "Authorization: Bearer $TALKING_BOX_DEVICE_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"text":"Oh. HTTP streaming. Much less dramatic."}' \
   -o /tmp/talking-box-test.mp3

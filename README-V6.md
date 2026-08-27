@@ -111,13 +111,17 @@ Health should then report:
 Talk to the box a few times, then inspect:
 
 ```bash
-curl -s https://api.enormousbrain.com/v1/entities/voice-box-001
+curl -s \
+  -H "Authorization: Bearer $TALKING_BOX_DEVICE_TOKEN" \
+  https://api.enormousbrain.com/v1/entities/voice-box-001
 ```
 
 and:
 
 ```bash
-curl -s 'https://api.enormousbrain.com/v1/entities/voice-box-001/memories?limit=20'
+curl -s \
+  -H "Authorization: Bearer $TALKING_BOX_DEVICE_TOKEN" \
+  'https://api.enormousbrain.com/v1/entities/voice-box-001/memories?limit=20'
 ```
 
 You should see state drift over time and durable memories appear only when the interaction is worth keeping.
