@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import atexit
 import base64
 import json
 import os
@@ -18,9 +19,11 @@ from lifecycle import calculate_sleep_duration, sleep_context_from_state
 try:
     from speaker_identity import SpeakerIdentity
     from anonymous_speaker_session import AnonymousSpeakerSession
+    from voice_enrollment import VoiceEnrollmentSession
 except Exception as speaker_import_error:
     SpeakerIdentity = None
     AnonymousSpeakerSession = None
+    VoiceEnrollmentSession = None
 else:
     speaker_import_error = None
 
@@ -128,6 +131,8 @@ button = Button(
 last_spoken_text = None
 speaker_identity = None
 anonymous_speakers = None
+voice_enrollment = None
+last_speaker_embedding = None
 last_verified_speaker = None
 
 
@@ -486,6 +491,7 @@ def transcribe(path):
 def initialize_speaker_identity():
     global speaker_identity
     global anonymous_speakers
+    global voice_enrollment
 
     if not SPEAKER_ID_ENABLED:
         print("Speaker identity disabled by configuration.")
@@ -509,6 +515,7 @@ def initialize_speaker_identity():
     try:
         speaker_identity = SpeakerIdentity(model_path=SPEAKER_MODEL)
         anonymous_speakers = AnonymousSpeakerSession()
+        voice_enrollment = VoiceEnrollmentSession()
         enrolled = speaker_identity.list_speakers()
         print(
             "Speaker identity ready: "
@@ -521,6 +528,7 @@ def initialize_speaker_identity():
     except Exception as exc:
         speaker_identity = None
         anonymous_speakers = None
+        voice_enrollment = None
         print(
             "Speaker identity initialization failed: "
             f"{type(exc).__name__}: {exc}"
@@ -567,6 +575,9 @@ def _speaker_with_session_metadata(result):
 
 def identify_speaker(path):
     global last_verified_speaker
+    global last_speaker_embedding
+
+    last_speaker_embedding = None
 
     if speaker_identity is None:
         return _speaker_with_session_metadata(
@@ -579,6 +590,7 @@ def identify_speaker(path):
 
     try:
         embedding = speaker_identity.embedding_from_wav(path)
+        last_speaker_embedding = embedding
         result = speaker_identity.identify_embedding(embedding)
 
         if (
@@ -627,28 +639,23 @@ def identify_speaker(path):
                 candidate_id
                 and similarity >= PROBABLE_SPEAKER_THRESHOLD
                 and margin_ok
+                and anonymous_speakers is not None
             ):
-                result = {
-                    "status": "probable",
-                    "id": None,
-                    "display_name": None,
-                    "candidate_id": candidate_id,
-                    "candidate_display_name": candidate_name,
-                    "similarity": similarity,
-                    "best_sample_similarity": result.get(
-                        "best_sample_similarity"
-                    ),
-                    "margin": margin,
-                    "threshold": speaker_identity.threshold,
+                # Keep an unverified match anonymous. The local enrollment
+                # controller needs only a familiarity signal, never the
+                # candidate's identity.
+                anonymous = anonymous_speakers.observe(embedding)
+                anonymous.update({
+                    "familiar_voice_match": True,
                     "identity_verified": False,
-                    "needs_confirmation": True,
                     "probable_basis": (
                         "recent_verified_same_candidate"
                         if recent_match
                         else "weak_enrolled_voice_match"
                     ),
                     "recent_verified_age_seconds": recent_age,
-                }
+                })
+                result = anonymous
 
             elif anonymous_speakers is not None:
                 anonymous = anonymous_speakers.observe(embedding)
@@ -698,6 +705,54 @@ def identify_speaker(path):
                 "display_name": None,
             }
         )
+
+
+def _enrollment_profile_id(name):
+    return re.sub(
+        r"-+", "-", re.sub(r"[^a-z0-9]+", "-", name.lower())
+    ).strip("-")[:80]
+
+
+def handle_voice_enrollment(transcript, speaker):
+    """Return a Pi-owned enrollment response, or None for normal LLM flow."""
+    if not (
+        voice_enrollment is not None
+        and last_speaker_embedding is not None
+        and speaker.get("status") == "anonymous"
+        and speaker.get("anonymous_id")
+    ):
+        return None
+
+    anonymous_id = speaker["anonymous_id"]
+
+    def promote(name, embeddings):
+        return speaker_identity.enroll_embeddings(
+            _enrollment_profile_id(name), name, embeddings, consent=True
+        )
+
+    response = voice_enrollment.handle(
+        anonymous_id,
+        last_speaker_embedding,
+        transcript,
+        _known_speakers_context(),
+        promote,
+        familiar=bool(speaker.get("familiar_voice_match")),
+    )
+    status = voice_enrollment.context(anonymous_id)
+    if status:
+        speaker["voice_enrollment"] = status
+    print(json.dumps({
+        "event": "voice_enrollment_transition",
+        "anonymous_id": anonymous_id,
+        "phase": status.get("phase") if status else "cleared",
+        "local_response": bool(response),
+    }, sort_keys=True))
+    return response
+
+
+def clear_voice_enrollment(reason="session_end"):
+    if voice_enrollment is not None:
+        print(json.dumps(voice_enrollment.clear(reason=reason), sort_keys=True))
 
 
 def _relationship_context():
@@ -1130,6 +1185,7 @@ def shutdown_box():
             f"shutdown message: {exc}"
         )
 
+    clear_voice_enrollment("shutdown")
     remember_shutdown()
 
     time.sleep(
@@ -1149,6 +1205,7 @@ def main():
 
     initialize_volume()
     initialize_speaker_identity()
+    atexit.register(clear_voice_enrollment)
 
     run_wake_sequence()
 
@@ -1219,14 +1276,16 @@ def main():
                 input_path
             )
 
+            enrollment_reply = handle_voice_enrollment(
+                transcript,
+                speaker,
+            )
+
             print(
                 "Thinking..."
             )
 
-            reply = interact(
-                transcript,
-                speaker,
-            )
+            reply = enrollment_reply or interact(transcript, speaker)
 
             print(
                 f"{ENTITY_ID}: {reply}"

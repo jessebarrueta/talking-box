@@ -182,10 +182,18 @@ class SpeakerIdentity:
     def _save_profiles(self):
         self.profiles_path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.profiles_path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(self.data, indent=2))
+        with tmp.open("w") as handle:
+            json.dump(self.data, handle, indent=2)
+            handle.flush()
+            os.fsync(handle.fileno())
         os.chmod(tmp, 0o600)
         tmp.replace(self.profiles_path)
         os.chmod(self.profiles_path, 0o600)
+        directory_fd = os.open(self.profiles_path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
 
     def embedding_from_wav(self, path):
         quality = wav_quality(path)
@@ -230,6 +238,39 @@ class SpeakerIdentity:
             profile["embeddings"] = profile["embeddings"][-MAX_EMBEDDINGS_PER_SPEAKER:]
         speakers[speaker_id] = profile
         self._save_profiles()
+        return {"id": speaker_id, "display_name": profile["display_name"],
+                "sample_count": len(profile["embeddings"])}
+
+    def enroll_embeddings(self, speaker_id, display_name, embeddings, consent,
+                          source="local_conversation_explicit_consent"):
+        """Atomically create a new profile from consented in-memory samples."""
+        if not consent:
+            raise ValueError("Explicit consent is required to enroll a voice profile")
+        speaker_id = _slug(speaker_id)
+        if speaker_id in self.data["speakers"]:
+            raise ValueError(f"Speaker profile already exists: {speaker_id}")
+        vectors = [_normalize(value).tolist() for value in embeddings]
+        if not vectors:
+            raise ValueError("At least one embedding is required")
+        now = utc_now()
+        profile = {
+            "display_name": display_name.strip() or speaker_id,
+            "consent": True,
+            "consent_source": source,
+            "consented_at": now,
+            "created_at": now,
+            "updated_at": now,
+            "embeddings": vectors[-MAX_EMBEDDINGS_PER_SPEAKER:],
+        }
+        old_data = self.data
+        new_data = {**old_data, "speakers": dict(old_data["speakers"])}
+        new_data["speakers"][speaker_id] = profile
+        self.data = new_data
+        try:
+            self._save_profiles()
+        except Exception:
+            self.data = old_data
+            raise
         return {"id": speaker_id, "display_name": profile["display_name"],
                 "sample_count": len(profile["embeddings"])}
 
