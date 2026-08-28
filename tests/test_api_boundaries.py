@@ -191,6 +191,58 @@ class InteractionBoundaryTests(unittest.TestCase):
         self.assertIsNone(body["memory_created"])
         self.assertEqual(body["messages_delivered"], [])
 
+    def test_prompt_receives_only_predictable_privacy_neutral_goal_guidance(self):
+        backend = StubBackend()
+        context = {
+            "body_capabilities": ["speaker", "microphone", "telepathy"],
+            "speaker": {
+                "status": "probable",
+                "candidate_id": "hidden-id",
+                "candidate_display_name": "Hidden Candidate",
+                "embedding": [0.1, 0.2],
+            },
+        }
+        deterministic_store = main.InMemoryMotivationStore(lambda: 100)
+        with patch.object(main.httpx, "AsyncClient", return_value=backend), \
+                patch.object(main, "motivation_store", deterministic_store):
+            response = self.client.post(
+                "/v1/entities/jerry/interact",
+                headers=DEVICE_HEADERS,
+                json={"text": "Hello", "context": context},
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        instruction = backend.chat_payloads[0]["messages"][-1]["content"]
+        guidance = instruction.split(
+            "Selected conversational guidance goals (deterministic, privacy-neutral):\n",
+            1,
+        )[1].split("\n\nRaw device/context metadata:", 1)[0]
+        parsed = json.loads(guidance)
+        self.assertLessEqual(len(parsed), 3)
+        self.assertNotIn("hidden-id", guidance)
+        self.assertNotIn("Hidden Candidate", guidance)
+        self.assertNotIn("embedding", guidance)
+        self.assertIn("Never claim you", instruction)
+
+    def test_human_emotion_claim_is_replaced_before_user_visible_reply(self):
+        backend = StubBackend(model_content=json.dumps({
+            "reply": "I feel happy and excited to see you.",
+            "state_delta": {},
+            "memory": {"remember": False},
+            "social_message": {"create": False},
+            "delivered_message_ids": [],
+        }))
+        response = self.interact(
+            backend,
+            {"status": "recognized", "id": "jesse", "display_name": "Jesse"},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(
+            response.json()["text"],
+            "I use internal interaction signals to guide my replies, but I "
+            "don't have human emotions or subjective experience.",
+        )
+
     def test_explicit_mailbox_routing_uses_exact_enrolled_recipient(self):
         backend = StubBackend(model_content="not valid JSON")
         response = self.interact(

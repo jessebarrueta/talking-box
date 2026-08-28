@@ -18,6 +18,7 @@ class ConfigurationError(ValueError):
 
 class Capability(str, Enum):
     SPEAKER = "speaker"
+    MICROPHONE = "microphone"
     BUTTON = "button"
     CAMERA = "camera"
     MOTION = "motion"

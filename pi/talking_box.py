@@ -801,6 +801,9 @@ def device_context():
     state = load_state()
 
     return {
+        # Shared server.deployments.Capability values. This declaration grants
+        # no action authority; it only lets server policy filter possible goals.
+        "body_capabilities": ["button", "microphone", "speaker"],
         "embodiment": (
             "Google AIY Voice Kit "
             "on Raspberry Pi 4"

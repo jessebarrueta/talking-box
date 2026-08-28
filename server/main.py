@@ -14,6 +14,11 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 try:
+    from .motivation_runtime import InMemoryMotivationStore
+except ImportError:
+    from motivation_runtime import InMemoryMotivationStore
+
+try:
     from .epistemics import (
         history_user_content as epistemic_history_user_content,
         history_visible_to_speaker,
@@ -123,6 +128,9 @@ MEMORY_TYPES = {
     "promise",
     "observation",
 }
+
+# Intentionally process-local: a server restart creates a fresh store.
+motivation_store = InMemoryMotivationStore()
 
 app = FastAPI(
     title="Enormous Brain Entity Service",
@@ -966,6 +974,7 @@ def _interaction_instruction(
     user_text,
     context,
     pending_messages=None,
+    motivation_context="[]",
 ):
     ledger = identity_ledger(context)
     known_speakers = known_speakers_from_context(context)
@@ -990,6 +999,9 @@ Relationship declarations supplied by the physical device:
 
 Pending social messages addressed to THIS verified speaker only:
 {json.dumps(pending_view, indent=2)}
+
+Selected conversational guidance goals (deterministic, privacy-neutral):
+{motivation_context}
 
 Raw device/context metadata:
 {json.dumps(context or {}, indent=2)}
@@ -1024,6 +1036,10 @@ Return ONLY one JSON object with this exact shape:
 Rules:
 - reply should sound natural when spoken aloud; usually 1-3 short sentences.
 - each state_delta should normally be between -0.05 and +0.05. Use 0 when nothing meaningfully changed.
+- Selected goals guide only this reply. They do not authorize hardware actions,
+  microphone activation, motion, persistence, or external calls.
+- Internal drive/affect values are interaction-control signals. Never claim you
+  have human emotions, feelings, needs, consciousness, or subjective experience.
 
 IDENTITY / EPISTEMIC RULES:
 - The identity evidence ledger is authoritative. Do not override it with conversational inference.
@@ -1100,6 +1116,24 @@ def _parse_interaction_payload(raw):
             {"create": False},
             [],
         )
+
+
+_HUMAN_EMOTION_CLAIM = re.compile(
+    r"\b(?:i (?:feel|am feeling) (?:happy|sad|angry|frustrated|afraid|lonely|"
+    r"excited|jealous)|i (?:have|experience) (?:human )?(?:emotions|feelings)|"
+    r"i am conscious)\b",
+    re.IGNORECASE,
+)
+
+
+def _guard_human_emotion_claim(reply):
+    """Fail closed if model output asserts human emotion or consciousness."""
+    if _HUMAN_EMOTION_CLAIM.search(reply or ""):
+        return (
+            "I use internal interaction signals to guide my replies, but I "
+            "don't have human emotions or subjective experience."
+        )
+    return reply
 
 
 def _offline_text(seconds):
@@ -1505,6 +1539,7 @@ async def interact(entity_id: str, request: InteractionRequest):
         entity["current_state"] = current_state
 
         current_speaker = _speaker_from_context(request.context)
+        motivation = motivation_store.update(entity_id, request.context)
 
         history = await _recent_interactions(
             client,
@@ -1560,6 +1595,7 @@ async def interact(entity_id: str, request: InteractionRequest):
                     request.text,
                     request.context,
                     pending_messages,
+                    motivation.prompt_context,
                 ),
             }
         )
@@ -1592,6 +1628,7 @@ async def interact(entity_id: str, request: InteractionRequest):
             social_message_request,
             requested_delivered_ids,
         ) = _parse_interaction_payload(raw)
+        answer = _guard_human_emotion_claim(answer)
 
         explicit_social = _explicit_social_message_request(
             request.text,
