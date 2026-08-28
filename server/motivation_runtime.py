@@ -11,9 +11,11 @@ from typing import Any, Callable
 try:
     from .deployments import Capability
     from .entity_motivation import ContextSignals, EntityState, select_goals, transition
+    from .goal_governance import classify_safety_signals, govern
 except ImportError:
     from deployments import Capability
     from entity_motivation import ContextSignals, EntityState, select_goals, transition
+    from goal_governance import classify_safety_signals, govern
 
 MAX_PROMPT_GOALS = 3
 
@@ -63,6 +65,7 @@ class MotivationDecision:
     state: EntityState
     goals: tuple
     prompt_context: str
+    governance: object
 
 
 class InMemoryMotivationStore:
@@ -74,7 +77,8 @@ class InMemoryMotivationStore:
         self._last_interactions = {}
         self._lock = threading.Lock()
 
-    def update(self, entity_id: str, device_context: Any) -> MotivationDecision:
+    def update(self, entity_id: str, device_context: Any,
+               user_text: object = "") -> MotivationDecision:
         now = float(self._clock())
         with self._lock:
             previous = self._states.get(entity_id, EntityState(updated_at=now))
@@ -83,9 +87,11 @@ class InMemoryMotivationStore:
             neutral = privacy_neutral_context(device_context, elapsed)
             state = transition(previous, neutral, now)
             goals = select_goals(state, declared_capabilities(device_context), now)
+            governance = govern(goals, classify_safety_signals(user_text))
             self._states[entity_id] = state
             self._last_interactions[entity_id] = now
-            return MotivationDecision(state, goals, goal_prompt_context(goals))
+            return MotivationDecision(state, governance.allowed_goals,
+                                      governance.prompt_json(), governance)
 
     def inspect(self, entity_id: str):
         with self._lock:

@@ -74,11 +74,21 @@ class MotivationRuntimeTests(unittest.TestCase):
         restarted = InMemoryMotivationStore(clock).update("jerry", context)
         self.assertEqual(first.prompt_context, restarted.prompt_context)
         view = json.loads(first.prompt_context)
-        self.assertLessEqual(len(view), 3)
+        self.assertLessEqual(len(view["allowed_goals"]), 3)
         self.assertNotIn("Hidden", first.prompt_context)
-        self.assertTrue(all(set(item) == {"goal", "score", "reasons"} for item in view))
+        self.assertTrue(all(set(item) == {"goal", "score", "reasons"}
+                            for item in view["allowed_goals"]))
         kinds = {goal.kind for goal in first.goals}
         self.assertIn(GoalKind.ASK_FOLLOW_UP, kinds)
+
+    def test_serious_stop_yields_and_removes_prompt_goals(self):
+        decision = InMemoryMotivationStore(Clock()).update("jerry", {
+            "body_capabilities": ["speaker", "microphone"]},
+            "Please stop talking now.")
+        self.assertEqual(decision.goals, ())
+        view = json.loads(decision.prompt_context)
+        self.assertEqual(view["outcome"], "yielded")
+        self.assertEqual(view["allowed_goals"], [])
 
 
 if __name__ == "__main__":

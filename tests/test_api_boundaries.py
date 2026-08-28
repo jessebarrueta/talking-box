@@ -214,11 +214,11 @@ class InteractionBoundaryTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         instruction = backend.chat_payloads[0]["messages"][-1]["content"]
         guidance = instruction.split(
-            "Selected conversational guidance goals (deterministic, privacy-neutral):\n",
+            "Governed conversational guidance (deterministic, privacy-neutral):\n",
             1,
         )[1].split("\n\nRaw device/context metadata:", 1)[0]
         parsed = json.loads(guidance)
-        self.assertLessEqual(len(parsed), 3)
+        self.assertLessEqual(len(parsed["allowed_goals"]), 3)
         self.assertNotIn("hidden-id", guidance)
         self.assertNotIn("Hidden Candidate", guidance)
         self.assertNotIn("embedding", guidance)

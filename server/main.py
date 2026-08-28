@@ -1000,7 +1000,7 @@ Relationship declarations supplied by the physical device:
 Pending social messages addressed to THIS verified speaker only:
 {json.dumps(pending_view, indent=2)}
 
-Selected conversational guidance goals (deterministic, privacy-neutral):
+Governed conversational guidance (deterministic, privacy-neutral):
 {motivation_context}
 
 Raw device/context metadata:
@@ -1539,7 +1539,7 @@ async def interact(entity_id: str, request: InteractionRequest):
         entity["current_state"] = current_state
 
         current_speaker = _speaker_from_context(request.context)
-        motivation = motivation_store.update(entity_id, request.context)
+        motivation = motivation_store.update(entity_id, request.context, request.text)
 
         history = await _recent_interactions(
             client,
