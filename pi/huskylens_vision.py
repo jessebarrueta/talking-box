@@ -62,8 +62,8 @@ class HuskyLensVision:
             learned=sensor_id > 0,
             x=int(getattr(block, "x", 0) or 0),
             y=int(getattr(block, "y", 0) or 0),
-            width=int(getattr(block, "w", 0) or 0),
-            height=int(getattr(block, "h", 0) or 0),
+            width=int(getattr(block, "width", 0) or 0),
+            height=int(getattr(block, "height", 0) or 0),
         )
 
     def snapshot(self) -> dict[str, Any]:
