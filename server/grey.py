@@ -69,6 +69,14 @@ async def story(seed: Story, response: Response):
     response.headers["Cache-Control"] = "public, max-age=300, s-maxage=86400"
     if seed in _story_cache:
         return _story_cache[seed]
+    line = await generate_line("Write a gentle two-sentence miniature fairy tale for a four-year-old in Grey's cozy pillow fort. No questions, instructions, scary events, or markdown.", STORIES[seed][0])
+    if line:
+        _story_cache[seed] = {"text": line, "source": "grey"}
+        return _story_cache[seed]
+    return story_fallback(seed)
+
+
+async def generate_line(instructions, prompt):
     key = os.getenv("OPENROUTER_API_KEY")
     if key:
         try:
@@ -80,19 +88,18 @@ async def story(seed: Story, response: Response):
                         "model": os.getenv("OPENROUTER_MODEL", "openai/gpt-4.1-mini"),
                         "max_tokens": 110,
                         "messages": [
-                            {"role": "system", "content": "Write a gentle two-sentence miniature fairy tale for a four-year-old in Grey's cozy pillow fort. No questions, instructions, scary events, or markdown."},
-                            {"role": "user", "content": STORIES[seed][0]},
+                            {"role": "system", "content": instructions},
+                            {"role": "user", "content": prompt},
                         ],
                     },
                 )
                 result.raise_for_status()
                 line = result.json()["choices"][0]["message"]["content"].strip()
                 if 10 <= len(line) <= 400:
-                    _story_cache[seed] = {"text": line, "source": "grey"}
-                    return _story_cache[seed]
+                    return line
         except (httpx.HTTPError, KeyError, ValueError, IndexError, AttributeError, TypeError):
             pass
-    return story_fallback(seed)
+    return None
 
 
 class Offer(BaseModel):
@@ -140,3 +147,55 @@ async def start_call(offer: Offer, authorization: str = Header(default="")):
             return Response(content=result.text, media_type="application/sdp", headers=PRIVATE)
     except (httpx.HTTPError, ValueError):
         raise HTTPException(502, "Grey could not answer. Please try again.", headers=PRIVATE) from None
+
+
+class FortTopic(str, Enum):
+    hello = "hello"
+    stars = "stars"
+    tune = "tune"
+    silly = "silly"
+
+
+class FortReply(str, Enum):
+    discover = "discover"
+    imagine = "imagine"
+    hum = "hum"
+
+
+TOPICS = {
+    FortTopic.hello: "welcome the visitor into your pillow fort",
+    FortTopic.stars: "a star stitched into the ceiling has begun to twinkle",
+    FortTopic.tune: "a pillow makes a soft humming sound",
+    FortTopic.silly: "a sock puppet thinks it is the mayor of the fort",
+}
+REPLIES = {
+    FortReply.discover: "look more closely together",
+    FortReply.imagine: "make up something silly together",
+    FortReply.hum: "make a musical game out of it",
+}
+_turn_cache = {}
+
+
+@router.get("/turns/{topic}/{reply}")
+async def tap_turn(topic: FortTopic, reply: FortReply, response: Response):
+    """Only two fixed game choices reach the model, even when visitors share a URL."""
+    response.headers["Cache-Control"] = "public, max-age=300, s-maxage=86400"
+    key = (topic, reply)
+    if key in _turn_cache:
+        return _turn_cache[key]
+    fallback = {
+        FortReply.discover: "Look up! One of the stitches on my blanket is twinkling. Shall we give it a name?",
+        FortReply.imagine: "Mayor Sock has called a meeting. All pillows must report for a very important squish!",
+        FortReply.hum: "Hmm, hmm, ba-dum! That was my pillow drum. Shall we find a song in my book?",
+    }[reply]
+    line = await generate_line(
+        "You are Grey, a playful animated singing friend for ages 4–8. "
+        "Speak directly in character in two short sentences from your pillow fort. "
+        "Stay within the pretend game. No personal questions, markdown, stage directions or emojis.",
+        f"The previous scene is: {TOPICS[topic]}. The visitor taps to {REPLIES[reply]}.",
+    )
+    result = {"text": line or fallback, "source": "grey" if line else "storybook",
+              "topic": {FortReply.discover: "stars", FortReply.imagine: "silly", FortReply.hum: "tune"}[reply]}
+    if line:
+        _turn_cache[key] = result
+    return result
