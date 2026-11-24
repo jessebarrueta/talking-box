@@ -137,6 +137,13 @@ app = FastAPI(
     version="0.7.3",
 )
 
+try:
+    from .grey import router as grey_router
+except ImportError:
+    from grey import router as grey_router
+
+app.include_router(grey_router)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
@@ -1756,3 +1763,4 @@ async def interact(entity_id: str, request: InteractionRequest):
         social_message_created=social_message_created,
         messages_delivered=messages_delivered,
     )
+
