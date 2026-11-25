@@ -191,6 +191,39 @@ class RouteTests(unittest.TestCase):
             with self.subTest(email=email), self.assertRaises(ValueError):
                 grey_access.FamilyEmail(email=email)
 
+    def test_signup_link_requires_approval_before_contacting_clerk(self):
+        with patch.object(grey_access, "require_admin", AsyncMock(return_value=OWNER)), \
+                patch.object(grey_access, "query", AsyncMock(return_value=[{"status": "pending"}])), \
+                patch.object(grey_access, "clerk_request", AsyncMock()) as provider:
+            response = self.client.post("/companions/grey/admin/families/signup-link", json={"email": FAMILY.primary_email})
+        self.assertEqual(response.status_code, 409)
+        provider.assert_not_called()
+
+    def test_new_family_gets_expiring_invitation_without_email_notification(self):
+        with patch.dict(os.environ, {"GREY_APP_ORIGIN": "https://enormousbrain.com"}), \
+                patch.object(grey_access, "require_admin", AsyncMock(return_value=OWNER)), \
+                patch.object(grey_access, "query", AsyncMock(return_value=[{"status": "approved"}])), \
+                patch.object(grey_access, "clerk_request", AsyncMock(side_effect=[
+                    httpx.Response(200, json=[]), httpx.Response(201, json={"url": "https://clerk.example/invitation"})])) as provider:
+            response = self.client.post("/companions/grey/admin/families/signup-link", json={"email": FAMILY.primary_email})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"url": "https://clerk.example/invitation", "existing_account": False})
+        provider.assert_awaited_with("POST", "invitations", json={"email_address": FAMILY.primary_email,
+            "redirect_url": "https://enormousbrain.com/singing-friend/?account=signup", "notify": False,
+            "ignore_existing": True, "expires_in_days": 7})
+        self.assertEqual(response.headers["cache-control"], "private, no-store")
+
+    def test_existing_account_gets_signin_link_without_new_invitation(self):
+        with patch.dict(os.environ, {"GREY_APP_ORIGIN": "https://enormousbrain.com"}), \
+                patch.object(grey_access, "require_admin", AsyncMock(return_value=OWNER)), \
+                patch.object(grey_access, "query", AsyncMock(return_value=[{"status": "approved"}])), \
+                patch.object(grey_access, "clerk_request", AsyncMock(return_value=httpx.Response(200,
+                    json=[{"email_addresses": [{"email_address": "Parent@Example.com"}]}]))) as provider:
+            response = self.client.post("/companions/grey/admin/families/signup-link", json={"email": FAMILY.primary_email})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"url": "https://enormousbrain.com/singing-friend/?account=signin", "existing_account": True})
+        self.assertEqual(provider.await_count, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

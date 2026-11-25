@@ -119,7 +119,7 @@ async def decide_family(body: FamilyDecision, response: Response, authorization:
 
 
 def signup_destination():
-    origin = os.getenv("GREY_APP_ORIGIN", "https://singing.enormousbrain.com").rstrip("/")
+    origin = os.getenv("GREY_APP_ORIGIN", "https://enormousbrain.com").rstrip("/")
     parsed = urlparse(origin)
     if parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password or parsed.path or parsed.query or parsed.fragment:
         raise denied(503, "The family signup destination is not configured.")
