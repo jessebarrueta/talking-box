@@ -144,6 +144,12 @@ except ImportError:
 
 app.include_router(grey_router)
 
+try:
+    from .grey_access import router as grey_access_router
+except ImportError:
+    from grey_access import router as grey_access_router
+app.include_router(grey_access_router)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,

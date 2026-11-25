@@ -1,6 +1,4 @@
 """Grey's anonymous fort activities and invited, ephemeral family calls."""
-import hashlib
-import hmac
 import json
 import os
 from enum import Enum
@@ -9,6 +7,13 @@ from pathlib import Path
 import httpx
 from fastapi import APIRouter, Header, HTTPException, Response
 from pydantic import BaseModel, Field
+
+try:
+    from .grey_access import require_family
+    from .grey_identity import identity_configured
+except ImportError:
+    from grey_access import require_family
+    from grey_identity import identity_configured
 
 router = APIRouter(prefix="/companions/grey", tags=["Singing Friend"])
 SONGS = json.loads(Path(__file__).with_name("grey_songs.json").read_text())
@@ -41,20 +46,16 @@ STORIES = {
 }
 
 
-def family_hashes():
-    return [v.strip().lower() for v in os.getenv("GREY_FAMILY_INVITE_HASHES", "").split(",") if len(v.strip()) == 64]
-
-
 def live_enabled():
     # Provision this dedicated project key only after configuring it for
     # child-directed use. Invitations are issued outside the app to approved families.
-    return bool(os.getenv("GREY_REALTIME_API_KEY") and family_hashes())
+    return bool(os.getenv("GREY_REALTIME_API_KEY") and identity_configured())
 
 
 @router.get("")
 async def capabilities(response: Response):
     response.headers.update(PRIVATE)
-    return {"id": "grey", "realtime": live_enabled(), "songs": list(SONGS), "reactions": REACTIONS}
+    return {"id": "grey", "realtime": live_enabled(), "family_accounts": identity_configured(), "songs": list(SONGS), "reactions": REACTIONS}
 
 
 def story_fallback(seed):
@@ -118,10 +119,7 @@ def tool(name, description, field, choices):
 async def start_call(offer: Offer, authorization: str = Header(default="")):
     if not live_enabled():
         raise HTTPException(503, "Live family calls are unavailable.", headers=PRIVATE)
-    scheme, _, invite = authorization.partition(" ")
-    digest = hashlib.sha256(invite.encode()).hexdigest()
-    if scheme.lower() != "bearer" or not any(hmac.compare_digest(digest, known) for known in family_hashes()):
-        raise HTTPException(403, "This family invitation is not recognized.", headers=PRIVATE)
+    await require_family(authorization)
     if not offer.sdp.startswith("v=0") or "m=audio " not in offer.sdp:
         raise HTTPException(400, "Expected an audio call offer.", headers=PRIVATE)
     session = {
